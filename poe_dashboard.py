@@ -380,95 +380,172 @@ def init_craft_costs(div_ratio):
     })
 
 
-def get_craft_suggestions(name, item_type, chaos, links, listings, demand):
+# ── Price lookup table (populated from raw API data before craft suggestions) ──
+# Maps "base_name" -> list of {chaos, links, gem_level, gem_quality, variant, ...}
+PRICE_LOOKUP = {}
+
+
+def build_price_lookup(raw_items_by_type):
+    """Build a lookup table from ALL raw poe.ninja data so craft suggestions
+    can compare actual market prices instead of guessing multipliers."""
+    PRICE_LOOKUP.clear()
+    for item_type, items in raw_items_by_type.items():
+        for item in items:
+            name = item.get("name") or item.get("baseType") or ""
+            if not name:
+                continue
+            entry = {
+                "chaos": round(item.get("chaosValue") or 0),
+                "listings": item.get("listingCount") or 0,
+                "links": item.get("links") or 0,
+                "gem_level": item.get("gemLevel") or 0,
+                "gem_quality": item.get("gemQuality") or 0,
+                "variant": item.get("variant") or "",
+                "type": item_type,
+                "corrupted": item.get("corrupted", False),
+            }
+            PRICE_LOOKUP.setdefault(name, []).append(entry)
+
+
+def lookup_price(name, **filters):
+    """Find the market price of a specific variant from real data.
+    Returns (chaos_price, listings) or (None, 0) if not found."""
+    entries = PRICE_LOOKUP.get(name, [])
+    for e in entries:
+        match = True
+        for k, v in filters.items():
+            if e.get(k) != v:
+                match = False
+                break
+        if match:
+            return e["chaos"], e["listings"]
+    return None, 0
+
+
+def get_craft_suggestions(name, item_type, chaos, links, listings, demand,
+                          gem_level=0, gem_quality=0):
     suggestions = []
     is_equip = item_type in ("UniqueArmour", "UniqueWeapon")
     is_jewel = item_type == "UniqueJewel"
     is_accessory = item_type == "UniqueAccessory"
     is_gem = item_type == "SkillGem"
-    # Demand barely affects profits — mostly about market reality
-    demand_mult = 1.0 + (demand / 500)  # 1.0 to 1.2x max
+    corrupt_cost = CRAFT_COSTS_CHAOS.get("corrupt", 25)
 
-    # Conservative cap: profit can't exceed item's price (100% return max)
-    def capped(profit):
-        return min(round(profit), chaos)
-
-    # 6-linking: realistic ~30-50% premium for linked version
+    # ── 6-linking: use REAL 6L price from poe.ninja ──
     if is_equip and links < 6 and chaos >= 100:
-        premium = chaos * 1.4  # linked version typically 40% more
-        profit = capped((premium - chaos - CRAFT_COSTS_CHAOS["6-link"]) * demand_mult)
-        if profit > 0:
-            suggestions.append({"method": "6-link", "action": "6-link then sell",
-                "reason": "Cheap base — 6-link adds ~40% value" if chaos < 500
-                          else "Non-6L underpriced vs linked version",
-                "profit": profit, "risk": "low" if chaos < 500 else "medium"})
+        sixl_price, sixl_listings = lookup_price(name, links=6)
+        if sixl_price and sixl_price > chaos:
+            link_cost = CRAFT_COSTS_CHAOS["6-link"]
+            profit = round(sixl_price - chaos - link_cost)
+            if profit > 0:
+                suggestions.append({"method": "6-link", "action": "6-link then sell",
+                    "reason": f"6L sells for {sixl_price}c (real price, {sixl_listings} listed). "
+                              f"Buy {links}L at {chaos}c + ~{link_cost}c linking cost",
+                    "profit": profit,
+                    "risk": "low" if profit > link_cost * 0.3 else "medium"})
 
-    # Double corrupt: high risk, ~20% chance of good outcome on average
+    # ── Gem corrupt to 21: use REAL 21/20 price ──
+    if is_gem and gem_level and int(gem_level) == 20:
+        lv21_price, lv21_listings = lookup_price(name, gem_level=21,
+                                                  gem_quality=gem_quality or 20)
+        if not lv21_price:
+            # Try without quality filter
+            lv21_price, lv21_listings = lookup_price(name, gem_level=21)
+        if lv21_price:
+            # Vaal orb outcomes: 1/8 chance level+1, 1/8 level-1,
+            # 1/4 add/change quality, 1/4 nothing, 1/8 brick to random gem
+            # EV = 0.125 * lv21_price + 0.125 * (chaos*0.3) + 0.25 * (chaos*0.8)
+            #    + 0.25 * chaos + 0.25 * 0 (brick)
+            ev = (0.125 * lv21_price +      # +1 level
+                  0.125 * chaos * 0.3 +      # -1 level (nearly worthless)
+                  0.25 * chaos * 0.8 +       # quality change (slight loss)
+                  0.25 * chaos +             # nothing happens
+                  0.25 * 0)                  # brick to random gem
+            profit = round(ev - chaos - corrupt_cost)
+            if profit > 0:
+                suggestions.append({"method": "corrupt", "action": f"Vaal Orb for 21/{gem_quality or 20}",
+                    "reason": f"21/{gem_quality or 20} sells for {lv21_price}c ({lv21_listings} listed). "
+                              f"12.5% chance. EV per attempt: {round(ev)}c",
+                    "profit": profit, "risk": "medium"})
+            elif lv21_price > chaos:
+                # Still show it but mark as negative EV
+                suggestions.append({"method": "corrupt", "action": f"Vaal Orb for 21/{gem_quality or 20}",
+                    "reason": f"21/{gem_quality or 20} = {lv21_price}c but EV is negative. "
+                              f"Only {round((lv21_price/chaos - 1)*100)}% premium vs 12.5% hit rate. Skip unless gambling",
+                    "profit": 0, "risk": "high"})
+        elif chaos >= 200:
+            # No 21 data at all — warn user
+            suggestions.append({"method": "corrupt", "action": "Vaal Orb (no 21 data)",
+                "reason": "No 21/20 price data on poe.ninja — cannot calculate profit. Check trade site manually",
+                "profit": 0, "risk": "high"})
+
+    # ── Double corrupt: conservative estimate ──
     if is_equip and chaos >= 300:
-        # Expected value = 20% chance of 2x, 80% chance of brick/bad
-        ev_mult = 0.2 * 2.0 + 0.8 * 0.3  # ~0.64 expected value ratio
-        profit = capped((chaos * ev_mult - CRAFT_COSTS_CHAOS["double_corrupt"]) * demand_mult)
-        if profit > 50:
-            suggestions.append({"method": "double_corrupt", "action": "Double corrupt unique",
-                "reason": "~20% chance to 2x+ value. High risk, high reward",
+        dc_cost = CRAFT_COSTS_CHAOS["double_corrupt"]
+        # 25% two good implicits, 25% one good, 25% bad, 25% brick
+        # Very hard to price without actual data — use conservative 15% chance of 2x
+        ev = chaos * (0.15 * 2.0 + 0.25 * 1.0 + 0.35 * 0.5 + 0.25 * 0)
+        profit = round(ev - chaos - dc_cost)
+        if profit > 0:
+            suggestions.append({"method": "double_corrupt",
+                "action": "Double corrupt unique",
+                "reason": f"~15% chance of 2x+ value. Cost: {chaos}c item + {dc_cost}c temple. "
+                          "High variance — only do if you can absorb total loss",
                 "profit": profit, "risk": "high"})
 
-    # Corrupt jewels/accessories: ~25% chance of good implicit
+    # ── Corrupt jewels/accessories: ~25% chance of good implicit ──
     if (is_accessory or is_jewel) and chaos >= 100:
-        ev = chaos * 0.25 * 1.5  # 25% chance of 50% value increase
-        profit = capped((ev - CRAFT_COSTS_CHAOS["corrupt"]) * demand_mult)
+        # Conservative: 25% chance of 30% value increase
+        ev = chaos * 0.25 * 1.3
+        profit = round(ev - corrupt_cost)
         if profit > 0:
             suggestions.append({"method": "corrupt", "action": "Corrupt for implicit",
-                "reason": "~25% chance of valuable implicit",
+                "reason": f"~25% chance of good implicit. Cost: {corrupt_cost}c. "
+                          "Good implicits can add 30%+ value",
                 "profit": profit, "risk": "low"})
 
-    # Harvest: moderate returns, ~30% of base value added on average
-    if is_equip and chaos >= 500:
-        profit = capped((chaos * 0.3 - CRAFT_COSTS_CHAOS["harvest"]) * demand_mult)
-        if profit > 0:
-            suggestions.append({"method": "harvest", "action": "Harvest reforge",
-                "reason": "Targeted reforge adds ~30% value on average",
-                "profit": profit, "risk": "medium"})
-
-    # Fracture: ~30% chance of hitting the right mod to fracture
-    if item_type == "BaseType" and chaos >= 500:
-        ev = chaos * 0.3 * 1.5  # 30% chance of 50% value add
-        profit = capped((ev - CRAFT_COSTS_CHAOS["fracture"]) * demand_mult)
-        if profit > 0:
-            suggestions.append({"method": "fracture", "action": "Fracture + craft",
-                "reason": "~30% chance to lock a good mod",
-                "profit": profit, "risk": "high"})
-
-    # Essence: guaranteed mod but need good RNG on rest, ~20% success rate
-    if item_type == "BaseType" and chaos >= 100:
-        profit = capped((chaos * 0.2 - CRAFT_COSTS_CHAOS["essence"]) * demand_mult)
-        if profit > 0:
-            suggestions.append({"method": "essence", "action": "Essence spam",
-                "reason": "Guaranteed mod — need ~5 attempts avg for sellable result",
-                "profit": profit, "risk": "low"})
-
-    # Gem corrupt to 21: ~12.5% chance (1/8 outcomes)
-    if is_gem and chaos >= 100:
-        ev = chaos * 0.125 * 3.0  # 12.5% chance of ~3x value
-        profit = capped((ev - CRAFT_COSTS_CHAOS.get("corrupt", 25)) * demand_mult)
-        if profit > 0:
-            suggestions.append({"method": "corrupt", "action": "Q20 + corrupt to 21",
-                "reason": "~12.5% chance of 21/20 (3x+ value)",
-                "profit": profit, "risk": "medium"})
-
-    # Single corrupt on equip: ~25% chance of useful implicit
+    # ── Single corrupt on equip ──
     if is_equip and chaos >= 100 and chaos < 1000:
-        ev = chaos * 0.25 * 1.3  # 25% chance of 30% value add
-        profit = capped((ev - CRAFT_COSTS_CHAOS["corrupt"]) * demand_mult)
+        ev = chaos * 0.25 * 1.3
+        profit = round(ev - corrupt_cost)
         if profit > 0:
             suggestions.append({"method": "corrupt", "action": "Single corrupt",
-                "reason": "~25% chance of good implicit",
+                "reason": f"~25% chance of good implicit. {corrupt_cost}c cost",
                 "profit": profit, "risk": "low"})
 
+    # ── Harvest reforge ──
+    if is_equip and chaos >= 500:
+        harvest_cost = CRAFT_COSTS_CHAOS["harvest"]
+        profit = round(chaos * 0.2 - harvest_cost)
+        if profit > 0:
+            suggestions.append({"method": "harvest", "action": "Harvest reforge",
+                "reason": f"Targeted reforge. ~20% avg value add, {harvest_cost}c cost",
+                "profit": profit, "risk": "medium"})
+
+    # ── Fracture (base types) ──
+    if item_type == "BaseType" and chaos >= 500:
+        frac_cost = CRAFT_COSTS_CHAOS["fracture"]
+        ev = chaos * 0.3 * 1.5
+        profit = round(ev - frac_cost)
+        if profit > 0:
+            suggestions.append({"method": "fracture", "action": "Fracture + craft",
+                "reason": f"~30% chance to lock good mod. Cost: {frac_cost}c",
+                "profit": profit, "risk": "high"})
+
+    # ── Essence craft (base types) ──
+    if item_type == "BaseType" and chaos >= 100:
+        ess_cost = CRAFT_COSTS_CHAOS["essence"]
+        profit = round(chaos * 0.2 - ess_cost)
+        if profit > 0:
+            suggestions.append({"method": "essence", "action": "Essence spam",
+                "reason": f"Guaranteed mod. ~5 attempts avg ({ess_cost}c each) for sellable result",
+                "profit": profit, "risk": "low"})
+
+    # ── Low listings context ──
     if listings <= 5 and chaos >= 100:
         for s in suggestions:
-            s["reason"] = "Low listings — demand spike likely. " + s["reason"]
-            s["profit"] = min(round(s["profit"] * 1.3), chaos * 3)
+            if s["profit"] > 0:
+                s["reason"] = "Low supply — price may spike. " + s["reason"]
     elif listings <= 20 and chaos >= 300:
         for s in suggestions:
             s["reason"] = "Scarce — price holds. " + s["reason"]
@@ -521,7 +598,8 @@ def build_rows(raw_items, item_type, div_ratio):
         tier = get_tier(chaos, div_ratio)
         builds = match_builds(name, item_type)
         demand = calc_demand(item, builds)
-        crafts = get_craft_suggestions(name, item_type, chaos, links, listings, demand)
+        crafts = get_craft_suggestions(name, item_type, chaos, links, listings, demand,
+                                       gem_level=gem_level, gem_quality=gem_quality)
         best = crafts[0] if crafts else None
         sparkline = item.get("sparkline", {}) or {}
         spark_data = sparkline.get("data", []) or []
@@ -951,25 +1029,30 @@ def find_whale_targets(all_rows, div_ratio):
         # ── Double Corrupt (Glimpse of Chaos) ──
         if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["chaos"] >= d * 2:
             dc_cost = CRAFT_COSTS_CHAOS.get("double_corrupt", 500)
-            profit = round(r["chaos"] * 1.5 - dc_cost)
             outcomes = get_corrupt_info(r["type"], r["name"])
-            if profit > 100:
+            # Conservative EV: 15% GG (2x), 25% decent (1x), 35% bad (0.5x), 25% brick (0)
+            ev = r["chaos"] * (0.15 * 2.0 + 0.25 * 1.0 + 0.35 * 0.5 + 0.25 * 0)
+            profit = round(ev - dc_cost)
+            if profit > 50:
                 detail = f"Use Glimpse of Chaos on {r['name']} ({r['chaos']}c + {dc_cost}c altar cost)"
                 detail += f". Target implicits: {', '.join(outcomes[:3])}"
-                detail += f". Good hit = {r['chaos']*3}c+. ~25% chance of bricking (poof), ~20% chance of GG"
+                detail += f". ~25% chance of bricking (poof), ~15% chance of GG double implicit"
                 strategies.append({"id": "double_corrupt", "profit": profit,
                     "detail": detail, "cost": r["chaos"] + dc_cost})
 
         # ── Vaal Corruption ──
         if r["type"] in ("UniqueArmour", "UniqueWeapon", "UniqueAccessory") and r["chaos"] >= 100 and r["chaos"] < d * 5:
             outcomes = get_corrupt_info(r["type"], r["name"])
-            profit = round(r["chaos"] * 0.8)
-            if profit > 50:
+            corrupt_cost = CRAFT_COSTS_CHAOS.get("corrupt", 25)
+            # EV: 25% good implicit (1.5x), 25% nothing (1x), 25% white sockets (1x), 25% brick (0.3x)
+            ev = r["chaos"] * (0.25 * 1.5 + 0.25 * 1.0 + 0.25 * 1.0 + 0.25 * 0.3)
+            profit = round(ev - r["chaos"] - corrupt_cost)
+            if profit > 30:
                 detail = f"Vaal Orb on {r['name']} ({r['chaos']}c). Valuable outcomes: {', '.join(outcomes[:3])}"
-                detail += f". ~25% chance of good implicit. Good hit = {r['chaos']*2}-{r['chaos']*4}c"
+                detail += f". ~25% chance of good implicit. Good hit = {round(r['chaos']*1.5)}-{round(r['chaos']*2)}c"
                 detail += ". 25% nothing, 25% reroll (brick), 25% white sockets"
                 strategies.append({"id": "vaal_corrupt", "profit": profit,
-                    "detail": detail, "cost": r["chaos"]})
+                    "detail": detail, "cost": r["chaos"] + corrupt_cost})
 
         # ── Tainted Chaos on Jewels ──
         if r["type"] == "UniqueJewel" and r["chaos"] >= 50:
@@ -1517,7 +1600,7 @@ function renderCraft(){
 }
 function renderSuggest(){
   const tf=document.getElementById('suggestTier').value,md=parseInt(document.getElementById('suggestMinDemand').value)||0,mo=document.getElementById('suggestMeta').checked,up=document.getElementById('suggestUnderpriced').checked,q=document.getElementById('suggestSearch').value.toLowerCase();
-  let items=DATA.filter(d=>d.top3&&d.top3.length>0).filter(d=>{if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.demand<md)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
+  let items=DATA.filter(d=>d.top3&&d.top3.length>0&&d.top3[0].profit>0).filter(d=>{if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.demand<md)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
   items.sort((a,b)=>(b.top3[0].profit||0)-(a.top3[0].profit||0));
   document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">2+ options</div><div class="stat-val">${items.filter(d=>d.top3.length>=2).length}</div></div><div class="stat-card"><div class="stat-label">High demand</div><div class="stat-val" style="color:var(--red)">${items.filter(d=>d.demand>=60).length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${items.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
   document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';
@@ -1534,10 +1617,10 @@ function renderSuggest(){
     if(!proMode){
       /* Simple mode: compact card */
       const o=showOpts[0];
-      return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta">${badges.join('')}<a class="trade-link" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">Trade &#10148;</a></div><div class="suggest-options"><div class="suggest-option best"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span></div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div></div></div></div>`;
+      return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta">${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options"><div class="suggest-option best"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span></div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div></div></div></div>`;
     }
-    const opts=showOpts.map((o,i)=>`<div class="suggest-option${i===0?' best':''}"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="suggest-option-num opt-${i+1}">${i+1}</span><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span>${i===0?'<span class="best-label">BEST</span>':''}</div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div><div class="suggest-option-reason">${esc(o.reason)}</div><div class="suggest-option-footer"><span class="risk-${o.risk||'low'}">Risk: ${(o.risk||'low').toUpperCase()}</span></div></div>`).join('');
-    return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta"><span class="tier-badge" style="color:${r.tier_color};border-color:${r.tier_color}30;background:${r.tier_color}18">${esc(r.tier_label)}</span><span style="font-size:12px;color:var(--muted)">${TL[r.type]||r.type}</span>${sparkSvg(r.spark)}${badges.join('')}<a class="trade-link" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">Trade &#10148;</a></div><div class="suggest-options">${opts}</div></div>`;
+    const opts=showOpts.map((o,i)=>{const profitHtml=o.profit>0?`<span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span>`:`<span style="color:var(--red)">-EV</span>`;return `<div class="suggest-option${i===0?' best':''}"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="suggest-option-num opt-${i+1}">${i+1}</span><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span>${i===0?'<span class="best-label">BEST</span>':''}</div>${profitHtml}</div><div class="suggest-option-reason">${esc(o.reason)}</div><div class="suggest-option-footer"><span class="risk-${o.risk||'low'}">Risk: ${(o.risk||'low').toUpperCase()}</span></div></div>`;}).join('');
+    return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta"><span class="tier-badge" style="color:${r.tier_color};border-color:${r.tier_color}30;background:${r.tier_color}18">${esc(r.tier_label)}</span><span style="font-size:12px;color:var(--muted)">${TL[r.type]||r.type}</span>${sparkSvg(r.spark)}${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options">${opts}</div></div>`;
   }).join('');
 }
 function renderFlip(){
@@ -1909,15 +1992,29 @@ def main():
 
     init_craft_costs(div_ratio)
 
+    # First pass: fetch all raw data for price lookup
+    raw_by_type = {}
+    for type_key, type_label in ITEM_TYPES:
+        try:
+            raw_by_type[type_key] = fetch(type_key)
+            print(f"  -> {len(raw_by_type[type_key])} raw items for {type_label}")
+        except Exception as e:
+            print(f"  !! Failed {type_label}: {e}")
+            raw_by_type[type_key] = []
+
+    # Build price lookup from ALL data before craft suggestions
+    build_price_lookup(raw_by_type)
+    print(f"  -> Price lookup: {sum(len(v) for v in PRICE_LOOKUP.values())} entries "
+          f"for {len(PRICE_LOOKUP)} unique items")
+
+    # Second pass: build rows (craft suggestions now use real prices)
     all_rows = []
     for type_key, type_label in ITEM_TYPES:
         try:
-            items = fetch(type_key)
-            rows = build_rows(items, type_key, div_ratio)
+            rows = build_rows(raw_by_type[type_key], type_key, div_ratio)
             all_rows.extend(rows)
-            print(f"  -> {len(rows)} items for {type_label}")
         except Exception as e:
-            print(f"  !! Failed {type_label}: {e}")
+            print(f"  !! Failed building rows for {type_label}: {e}")
 
     compute_underpriced(all_rows)
     prev_data = load_previous_data()
