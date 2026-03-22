@@ -8,15 +8,18 @@ Simple/Pro mode toggle. Centered layout with improved UI/UX.
 History snapshots saved to poe_dashboard_history/ (last 20 kept).
 Alerts include: spike, crash, drying, flood, new, underpriced, meta_spike, corner_risk.
 
-Run:  python poe_dashboard.py
-Open: poe_dashboard.html in your browser
+Run:  python poe_dashboard.py           (generate static HTML)
+      python poe_dashboard.py --serve   (live server with refresh button)
+Open: http://localhost:5000 (serve mode) or poe_dashboard.html (static mode)
 """
 
 import urllib.request
 import json
 import os
+import sys
 import glob as globmod
 import statistics
+import threading
 from datetime import datetime
 
 LEAGUE = "Mirage"
@@ -166,7 +169,18 @@ def fetch_divine_ratio():
 
 
 def fetch_all_currencies():
-    """Fetch currency data — only currencies with REAL buy+sell listings in game."""
+    """Fetch currency data with REAL in-game exchange ratios.
+
+    poe.ninja API values:
+      pay.value = how many of THIS CURRENCY people offer per 1 chaos
+                  (e.g. GCP pay=0.55 means "I give 0.55 GCP for your 1c" → buy ratio ~1.82:1)
+      receive.value = how many chaos people offer per 1 of this currency
+                  (e.g. GCP receive=3.0 means "I give 3c for your 1 GCP")
+
+    IMPORTANT: These are poe.ninja averages, NOT exact in-game listings.
+    Real spreads are much tighter than what the raw numbers suggest.
+    We show the ratios honestly and warn when spread looks unreliable.
+    """
     url = f"https://poe.ninja/api/data/currencyoverview?league={LEAGUE}&type=Currency"
     print("  Fetching all currencies...")
     req = urllib.request.Request(url, headers={"User-Agent": "poe-dashboard/1.0"})
@@ -181,69 +195,87 @@ def fetch_all_currencies():
             pay_obj = line.get("pay")
             receive_obj = line.get("receive")
 
-            # Skip currencies without BOTH buy and sell data — means no real exchange pair
             if not pay_obj or not pay_obj.get("value") or not pay_obj.get("listing_count"):
                 continue
             if not receive_obj or not receive_obj.get("value") or not receive_obj.get("listing_count"):
                 continue
 
-            pay_val = pay_obj["value"]        # how many of this you pay per 1 chaos
-            recv_val = receive_obj["value"]    # how many chaos you get per 1 of this
+            pay_val = pay_obj["value"]       # units of currency per 1 chaos (buy side)
+            recv_val = receive_obj["value"]  # chaos per 1 unit of currency (sell side)
             pay_listings = pay_obj.get("listing_count", 0)
             recv_listings = receive_obj.get("listing_count", 0)
 
-            # Need meaningful listing volume on both sides
             if pay_listings < 3 or recv_listings < 3:
                 continue
 
-            # Buy price = what you spend in chaos to buy 1 unit (from people selling it)
-            buy_price = round(1.0 / pay_val, 2) if pay_val > 0 else 0
-            # Sell price = what you get in chaos when selling 1 unit (to people buying it)
-            sell_price = round(recv_val, 2) if recv_val > 0 else 0
+            # Show as ratios people actually see in-game
+            # Buy ratio: how many of this currency per 1 chaos you get
+            buy_ratio = round(pay_val, 4)  # e.g. 2.89 GCP per chaos
+            # Sell ratio: how many of this currency per 1 chaos you give
+            sell_ratio = round(1.0 / recv_val, 4) if recv_val > 0 else 0  # e.g. 2.7 GCP per chaos
 
-            if buy_price <= 0 or sell_price <= 0:
-                continue
+            # For expensive currencies (>1c each), show as chaos per unit
+            is_expensive = chaos_eq >= 1
+            if is_expensive:
+                # Buy: you pay X chaos to get 1 unit
+                buy_chaos = round(1.0 / pay_val, 2) if pay_val > 0 else 0
+                # Sell: you get X chaos per 1 unit
+                sell_chaos = round(recv_val, 2) if recv_val > 0 else 0
+                if buy_chaos <= 0 or sell_chaos <= 0:
+                    continue
+                spread = round((sell_chaos - buy_chaos) / buy_chaos * 100, 2)
+                profit_per = round(sell_chaos - buy_chaos, 2)
+                display_buy = f"{buy_chaos}c each"
+                display_sell = f"{sell_chaos}c each"
+            else:
+                # Cheap currencies: show as X:1c ratio
+                if buy_ratio <= 0 or sell_ratio <= 0:
+                    continue
+                # Profit = you buy X per chaos, sell them back and get more chaos
+                # Buy X at buy_ratio per chaos → sell X at sell_ratio per chaos
+                # Profit per chaos = (buy_ratio / sell_ratio) - 1
+                if sell_ratio > 0:
+                    profit_ratio = (buy_ratio / sell_ratio) - 1
+                    spread = round(profit_ratio * 100, 2)
+                    profit_per = round(profit_ratio, 4)
+                else:
+                    spread = 0
+                    profit_per = 0
+                display_buy = f"{buy_ratio}:1c"
+                display_sell = f"{sell_ratio}:1c"
 
-            spread = round((sell_price - buy_price) / buy_price * 100, 2)
-            profit_per = round(sell_price - buy_price, 2)
-            # Volume = approximate trades possible per session
+            # Flag unreliable spreads (poe.ninja averages can be stale)
+            reliable = "yes" if abs(spread) < 30 else "check"
             volume = min(pay_listings, recv_listings)
 
             currencies.append({
-                "name": name,
-                "chaos_eq": chaos_eq,
-                "buy_price": buy_price,
-                "sell_price": sell_price,
-                "spread": spread,
-                "profit": profit_per,
-                "buy_listings": pay_listings,
-                "sell_listings": recv_listings,
-                "volume": volume,
+                "name": name, "chaos_eq": chaos_eq,
+                "buy_ratio": buy_ratio, "sell_ratio": sell_ratio,
+                "display_buy": display_buy, "display_sell": display_sell,
+                "spread": spread, "profit": profit_per,
+                "buy_listings": pay_listings, "sell_listings": recv_listings,
+                "volume": volume, "reliable": reliable,
+                "is_expensive": is_expensive,
             })
 
-        # Only show currencies with actual spread data
         currencies.sort(key=lambda c: c["spread"], reverse=True)
 
-        # Simple arbitrage: just buy/sell same currency for spread > 2%
-        # No fake multi-hop loops — only real direct exchange pairs
+        # Only flag as arbitrage if spread is realistic (2-20%) and reliable
         arb_opps = []
         for c in currencies:
-            if c["spread"] > 2 and c["profit"] > 0.5 and c["volume"] >= 5:
-                # Profit per 100c invested
-                units_per_100c = 100 / c["buy_price"] if c["buy_price"] > 0 else 0
-                total_sell = round(units_per_100c * c["sell_price"], 1)
-                net_profit = round(total_sell - 100, 1)
-                if net_profit > 1:
-                    arb_opps.append({
-                        "name": c["name"],
-                        "buy_price": c["buy_price"],
-                        "sell_price": c["sell_price"],
-                        "spread": c["spread"],
-                        "invest_100c": f"Buy {round(units_per_100c, 1)} at {c['buy_price']}c each → sell for {total_sell}c",
-                        "net_profit": net_profit,
-                        "volume": c["volume"],
-                    })
-        arb_opps.sort(key=lambda x: x["net_profit"], reverse=True)
+            if c["spread"] > 2 and c["spread"] < 20 and c["reliable"] == "yes" and c["volume"] >= 5:
+                if c["is_expensive"]:
+                    desc = f"Buy at {c['display_buy']}, sell at {c['display_sell']}"
+                    net = c["profit"]
+                else:
+                    desc = f"Buy at {c['display_buy']}, sell at {c['display_sell']} — profit {c['spread']:.1f}% per cycle"
+                    net = round(c["spread"], 2)
+                arb_opps.append({
+                    "name": c["name"], "spread": c["spread"],
+                    "desc": desc, "net_profit": net,
+                    "volume": c["volume"], "reliable": c["reliable"],
+                })
+        arb_opps.sort(key=lambda x: x["spread"], reverse=True)
 
         return currencies, arb_opps
     except Exception as e:
@@ -338,12 +370,13 @@ CRAFT_COSTS_CHAOS = {}
 def init_craft_costs(div_ratio):
     d = div_ratio if div_ratio > 0 else 200
     CRAFT_COSTS_CHAOS.update({
-        "6-link":         round(d * 1.5),
-        "corrupt":        round(d * 0.1),
-        "double_corrupt": round(d * 2),
-        "harvest":        round(d * 1),
-        "fracture":       round(d * 3),
-        "essence":        round(d * 0.5),
+        "6-link":           round(d * 1.5),   # ~1500 fusings average
+        "6-link-tainted":   round(d * 0.3),   # tainted fusings on corrupted items — MUCH cheaper
+        "corrupt":          round(d * 0.1),
+        "double_corrupt":   round(d * 2),
+        "harvest":          round(d * 1),
+        "fracture":         round(d * 3),
+        "essence":          round(d * 0.5),
     })
 
 
@@ -448,10 +481,36 @@ def get_craft_suggestions(name, item_type, chaos, links, listings, demand):
 # ROW BUILDING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def price_confidence(listings, spark_data):
+    """Rate price confidence 0-100 based on listing count and data quality."""
+    if listings <= 1:
+        return 10
+    elif listings <= 3:
+        return 25
+    elif listings <= 5:
+        return 40
+    elif listings <= 10:
+        return 55
+    elif listings <= 20:
+        return 70
+    elif listings <= 50:
+        return 85
+    else:
+        conf = 95
+    # Penalize if sparkline has gaps (stale data)
+    if spark_data:
+        zeroes = sum(1 for v in spark_data if v == 0 or v is None)
+        if zeroes > len(spark_data) * 0.5:
+            conf = max(conf - 20, 10)
+    return conf
+
+
 def build_rows(raw_items, item_type, div_ratio):
     rows = []
     for item in raw_items:
         name = item.get("name") or item.get("baseType") or ""
+        variant = item.get("variant") or ""
+        details_id = item.get("detailsId") or ""
         chaos = round(item.get("chaosValue") or 0)
         listings = item.get("listingCount") or 0
         links = item.get("links") or 0
@@ -466,13 +525,16 @@ def build_rows(raw_items, item_type, div_ratio):
         best = crafts[0] if crafts else None
         sparkline = item.get("sparkline", {}) or {}
         spark_data = sparkline.get("data", []) or []
+        conf = price_confidence(listings, spark_data)
 
         rows.append({
-            "name": name, "chaos": chaos, "listings": listings,
+            "name": name, "variant": variant, "details_id": details_id,
+            "chaos": chaos, "listings": listings,
             "links": links, "gem_level": gem_level, "gem_quality": gem_quality,
             "level_req": level_req, "score": score, "type": item_type,
             "tier_label": tier["label"], "tier_color": tier["color"],
             "tier_idx": tier["idx"], "builds": builds, "demand": demand,
+            "confidence": conf,
             "craft_method": best["method"] if best else "",
             "craft_action": best["action"] if best else "",
             "craft_reason": best["reason"] if best else "",
@@ -756,104 +818,200 @@ def find_whale_targets(all_rows, div_ratio):
     targets = []
     d = div_ratio if div_ratio > 0 else 200
 
+    # Valuable corruption outcomes by item slot
+    CORRUPT_OUTCOMES = {
+        "UniqueArmour": {
+            "body": ["+1 to Level of Socketed Gems", "+2 Socketed Duration/AoE Gems", "Additional Curse", "+50% increased Damage"],
+            "helmet": ["+2 to Socketed AoE/Minion Gems", "+2 to Socketed Aura Gems", "Nearby enemies take 9% inc Ele Dmg"],
+            "gloves": ["Vulnerability on Hit", "Elemental Weakness on Hit", "+1 Frenzy Charge", "+1 Power Charge"],
+            "boots": ["+1 to Socketed Gems", "Cannot be Frozen", "+2% base Crit Chance"],
+            "shield": ["+1 to Socketed Gems", "+5% Block/Spell Block", "Additional Curse"],
+            "generic": ["+1 to Level of Socketed Gems", "+50% increased Damage", "% max Life/ES"],
+        },
+        "UniqueWeapon": {
+            "generic": ["+2 to Level of Socketed Gems", "Hits can't be Evaded", "Culling Strike", "+% to Critical Strike Multiplier"],
+        },
+        "UniqueJewel": {
+            "generic": ["Corrupted Blood immunity", "2% reduced Mana Reserved", "+1% max All Resistances", "Hinder/Maim on Hit"],
+        },
+        "UniqueAccessory": {
+            "amulet": ["+1 to Level of All Skill Gems", "+1 All Str/Dex/Int Gems", "% additional Phys Dmg Reduction"],
+            "ring": ["Vulnerability on Hit", "Assassin's Mark on Hit", "Poacher's Mark on Hit"],
+            "belt": ["% increased max Energy Shield", "% increased max Life"],
+            "generic": ["+1 to Level of All Skill Gems", "Curse on Hit"],
+        },
+    }
+
+    def get_corrupt_info(item_type, name):
+        """Get specific valuable corruption outcomes for this item type."""
+        name_l = name.lower()
+        slot_map = CORRUPT_OUTCOMES.get(item_type, {})
+        # Try to guess slot from name keywords
+        if item_type == "UniqueArmour":
+            if any(w in name_l for w in ["plate", "vest", "robe", "coat", "jack", "regalia", "ire", "fur", "heart", "vision"]):
+                return slot_map.get("body", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["crown", "helm", "mask", "hood", "head", "halo", "cage", "burgonet"]):
+                return slot_map.get("helmet", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["gauntlet", "glove", "mitt", "hand"]):
+                return slot_map.get("gloves", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["boot", "shoe", "step", "greave", "slink", "track"]):
+                return slot_map.get("boots", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["shield", "buckler", "kite", "tower", "aegis", "frame", "phoenix"]):
+                return slot_map.get("shield", slot_map.get("generic", []))
+        elif item_type == "UniqueAccessory":
+            if any(w in name_l for w in ["amulet", "talisman", "choker", "pendant", "foible", "presence", "impresence", "uprising"]):
+                return slot_map.get("amulet", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["ring", "circle", "mark", "pyre", "coil"]):
+                return slot_map.get("ring", slot_map.get("generic", []))
+            elif any(w in name_l for w in ["belt", "sash", "stygian", "chain", "clasp"]):
+                return slot_map.get("belt", slot_map.get("generic", []))
+        return slot_map.get("generic", ["Good implicits possible"])
+
+    def build_reason(r):
+        """Build a 'why this item' explanation."""
+        parts = []
+        if r.get("builds"):
+            parts.append(f"Used by {', '.join(r['builds'])}")
+        if r["listings"] <= 3:
+            parts.append(f"Only {r['listings']} listed — extremely scarce")
+        elif r["listings"] <= 10:
+            parts.append(f"Low supply ({r['listings']} listed)")
+        if r["demand"] >= 60:
+            parts.append("High demand (60+)")
+        elif r["demand"] >= 30:
+            parts.append("Moderate demand")
+        if r.get("underpriced", 0) > 0:
+            parts.append(f"{r['underpriced']}% below median price")
+        return ". ".join(parts) if parts else ""
+
     for r in all_rows:
         if r["chaos"] < 50:
             continue
 
         strategies = []
         corner_score = 0
-
-        # ── Supply Cornering Analysis ──
-        # Low supply + decent value + real demand = cornerable
+        item_reason = build_reason(r)
         has_meta = len(r.get("builds", [])) > 0
+
+        # ── Supply Cornering ──
         if r["listings"] <= 10 and r["chaos"] >= d:
             cost_to_corner = r["chaos"] * r["listings"]
-            # Conservative: price rises ~20-50% after cornering, based on demand
-            demand_pct = 0.2 + (r["demand"] / 200)  # 20% to 70% rise max
+            demand_pct = 0.2 + (r["demand"] / 200)
             if has_meta:
-                demand_pct += 0.15  # meta builds = guaranteed demand
+                demand_pct += 0.15
             projected_price = round(r["chaos"] * (1 + demand_pct))
             projected_profit = round((projected_price - r["chaos"]) * r["listings"])
             if projected_profit > 0 and cost_to_corner < 50000:
-                # Score: demand (40pts) + meta build usage (30pts) + scarcity (30pts)
                 demand_pts = min(round(r["demand"] * 0.4), 40)
-                meta_pts = len(r.get("builds", [])) * 10  # 10pts per build, max 30
-                meta_pts = min(meta_pts, 30)
-                scarcity_pts = max(0, round((10 - r["listings"]) * 3))  # 0-30pts
+                meta_pts = min(len(r.get("builds", [])) * 10, 30)
+                scarcity_pts = max(0, round((10 - r["listings"]) * 3))
                 corner_score = min(demand_pts + meta_pts + scarcity_pts, 100)
-                strategies.append({
-                    "id": "corner", "profit": projected_profit,
-                    "detail": f"Buy all {r['listings']} at {r['chaos']}c = {cost_to_corner}c total. Relist at ~{projected_price}c (+{round(demand_pct*100)}%). Profit: {projected_profit}c",
-                    "cost": cost_to_corner,
-                })
+                why = f"Buy all {r['listings']} at {r['chaos']}c = {cost_to_corner}c total"
+                why += f". Relist at ~{projected_price}c (+{round(demand_pct*100)}%)"
+                if has_meta:
+                    why += f". Builds ({', '.join(r['builds'])}) guarantee buyers"
+                if r["listings"] <= 3:
+                    why += ". Almost no supply — easy to control"
+                strategies.append({"id": "corner", "profit": projected_profit,
+                    "detail": why, "cost": cost_to_corner})
 
         # ── 6-Link Flipping ──
         if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["links"] < 6 and r["chaos"] >= 100:
             link_cost = CRAFT_COSTS_CHAOS.get("6-link", 370)
-            sell_est = round(r["chaos"] * 1.4)  # linked ~40% more realistically
-            profit = sell_est - r["chaos"] - link_cost
-            if profit > 50:
-                strategies.append({"id": "6link_flip", "profit": profit,
-                    "detail": f"Buy at {r['chaos']}c, 6-link (~{link_cost}c), sell ~{sell_est}c",
-                    "cost": r["chaos"] + link_cost})
+            tainted_cost = CRAFT_COSTS_CHAOS.get("6-link-tainted", 75)
+            sell_est = round(r["chaos"] * 1.4)
+            # Normal fusings path
+            profit_normal = sell_est - r["chaos"] - link_cost
+            # Tainted fusings path (corrupt first, then tainted fuse — much cheaper)
+            profit_tainted = sell_est - r["chaos"] - tainted_cost
+            if profit_normal > 50 or profit_tainted > 50:
+                detail = f"Buy {r['links'] or 0}L at {r['chaos']}c"
+                detail += f". Option A: Regular fusings (~{link_cost}c, profit {profit_normal}c)"
+                detail += f". Option B: Corrupt first → tainted fusings (~{tainted_cost}c, profit {profit_tainted}c — much cheaper but item is corrupted)"
+                detail += f". Sell 6L for ~{sell_est}c"
+                if has_meta:
+                    detail += f". Needed by {', '.join(r['builds'])}"
+                best_profit = max(profit_normal, profit_tainted)
+                best_cost = r["chaos"] + (link_cost if profit_normal >= profit_tainted else tainted_cost)
+                strategies.append({"id": "6link_flip", "profit": best_profit,
+                    "detail": detail, "cost": best_cost})
 
-        # ── Gem Leveling ──
+        # ── Awakened Gem Leveling ──
         if r["type"] == "SkillGem" and "awakened" in r["name"].lower():
             if r.get("gem_level") and str(r["gem_level"]) in ("4", "3"):
+                lv = int(r["gem_level"])
                 profit = round(r["chaos"] * 1.5)
+                detail = f"Buy lv{lv} at {r['chaos']}c. Level to {lv+1} in your offhand while mapping"
+                detail += f". Lv{lv+1} sells for ~{r['chaos']+profit}c. Takes ~2-5 days of casual play"
+                if has_meta:
+                    detail += f". Needed by {', '.join(r['builds'])}"
                 strategies.append({"id": "gem_level", "profit": profit,
-                    "detail": f"Buy lv{r['gem_level']} at {r['chaos']}c, level to {int(r['gem_level'])+1}, sell for ~{r['chaos']+profit}c",
-                    "cost": r["chaos"]})
+                    "detail": detail, "cost": r["chaos"]})
 
-        # ── Double Corrupt ──
+        # ── Double Corrupt (Glimpse of Chaos) ──
         if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["chaos"] >= d * 2:
             dc_cost = CRAFT_COSTS_CHAOS.get("double_corrupt", 500)
             profit = round(r["chaos"] * 1.5 - dc_cost)
+            outcomes = get_corrupt_info(r["type"], r["name"])
             if profit > 100:
+                detail = f"Use Glimpse of Chaos on {r['name']} ({r['chaos']}c + {dc_cost}c altar cost)"
+                detail += f". Target implicits: {', '.join(outcomes[:3])}"
+                detail += f". Good hit = {r['chaos']*3}c+. ~25% chance of bricking (poof), ~20% chance of GG"
                 strategies.append({"id": "double_corrupt", "profit": profit,
-                    "detail": f"Double corrupt at {r['chaos']}c (+{dc_cost}c craft). Good hit = {r['chaos']*3}c+",
-                    "cost": r["chaos"] + dc_cost})
+                    "detail": detail, "cost": r["chaos"] + dc_cost})
 
         # ── Vaal Corruption ──
-        if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["chaos"] >= 100 and r["chaos"] < d * 5:
+        if r["type"] in ("UniqueArmour", "UniqueWeapon", "UniqueAccessory") and r["chaos"] >= 100 and r["chaos"] < d * 5:
+            outcomes = get_corrupt_info(r["type"], r["name"])
             profit = round(r["chaos"] * 0.8)
             if profit > 50:
+                detail = f"Vaal Orb on {r['name']} ({r['chaos']}c). Valuable outcomes: {', '.join(outcomes[:3])}"
+                detail += f". ~25% chance of good implicit. Good hit = {r['chaos']*2}-{r['chaos']*4}c"
+                detail += ". 25% nothing, 25% reroll (brick), 25% white sockets"
                 strategies.append({"id": "vaal_corrupt", "profit": profit,
-                    "detail": f"Corrupt for +1 gems / good implicits. Cost: {r['chaos']}c, hit value: {r['chaos']*3}c+",
-                    "cost": r["chaos"]})
+                    "detail": detail, "cost": r["chaos"]})
 
         # ── Tainted Chaos on Jewels ──
         if r["type"] == "UniqueJewel" and r["chaos"] >= 50:
+            outcomes = get_corrupt_info(r["type"], r["name"])
             profit = round(r["chaos"] * 1.2)
+            detail = f"Buy {r['name']} with good implicit ({', '.join(outcomes[:2])})"
+            detail += f". Use Tainted Chaos Orbs to reroll mods while keeping implicit"
+            detail += ". If it goes normal (uncorrupted), use Tainted Mythic Orb — jewels have tons of uniques so you'll hit something"
             strategies.append({"id": "tainted_chaos_jewels", "profit": profit,
-                "detail": f"Buy with good implicit, tainted chaos until GG. If normal → mythic orb (many unique jewels = good odds)",
-                "cost": r["chaos"] + 50})
+                "detail": detail, "cost": r["chaos"] + 50})
 
-        # ── Harvest Fracture targets ──
+        # ── Harvest Fracture ──
         if r["type"] == "BaseType" and r["chaos"] >= d * 2:
             frac_cost = CRAFT_COSTS_CHAOS.get("fracture", 750)
             profit = round(r["chaos"] * 0.8)
             if profit > 100:
+                detail = f"Fracture a T1 mod on {r['name']} ({frac_cost}c for fracture)"
+                detail += ". Fractured mod is locked forever — reroll rest with essences/harvest"
+                detail += ". Sells at premium because crafters can deterministically finish the item"
                 strategies.append({"id": "harvest_fracture", "profit": profit,
-                    "detail": f"Fracture good mod on {r['name']}, reroll rest. Cost: {r['chaos']+frac_cost}c",
-                    "cost": r["chaos"] + frac_cost})
+                    "detail": detail, "cost": r["chaos"] + frac_cost})
 
         # ── Essence Crafting ──
         if r["type"] == "BaseType" and r["chaos"] >= 100:
             ess_cost = CRAFT_COSTS_CHAOS.get("essence", 125)
             profit = round(r["chaos"] * 0.5)
             if profit > 30:
+                detail = f"Use Deafening Essences on {r['name']} (~{ess_cost}c per attempt)"
+                detail += ". Guarantees one good mod, need ~5 attempts avg for sellable result"
+                detail += ". Best on bases meta builds need (check build badges)"
                 strategies.append({"id": "essence_craft", "profit": profit,
-                    "detail": f"Essence spam on {r['name']}. Cost per attempt: ~{ess_cost}c",
-                    "cost": r["chaos"] + ess_cost})
+                    "detail": detail, "cost": r["chaos"] + ess_cost})
 
         if not strategies:
             continue
 
         best = max(strategies, key=lambda s: s["profit"])
         targets.append({
-            "name": r["name"], "type": r["type"], "chaos": r["chaos"],
+            "name": r["name"], "variant": r.get("variant", ""),
+            "type": r["type"], "chaos": r["chaos"],
             "listings": r["listings"], "demand": r["demand"],
+            "confidence": r.get("confidence", 95),
             "builds": r["builds"], "trade_cat": r.get("trade_cat", ""),
             "tier_label": r["tier_label"], "tier_color": r["tier_color"],
             "corner_score": corner_score,
@@ -862,15 +1020,15 @@ def find_whale_targets(all_rows, div_ratio):
             "best_profit": best["profit"],
             "best_detail": best["detail"],
             "best_cost": best["cost"],
+            "item_reason": item_reason,
         })
 
-    # Remove insane profits, then sort: cornerable+meta first, then by profit
     targets = [t for t in targets if t["best_profit"] < 100000]
     targets.sort(key=lambda t: (
-        t["corner_score"] * 2 +  # cornering potential
-        len(t["builds"]) * 20 +  # meta build bonus
-        t["demand"] +            # demand
-        min(t["best_profit"] / 10, 50)  # profit (diminishing)
+        t["corner_score"] * 2 +
+        len(t["builds"]) * 20 +
+        t["demand"] +
+        min(t["best_profit"] / 10, 50)
     ), reverse=True)
     return targets
 
@@ -967,6 +1125,12 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .history-item:last-child{border-bottom:none}
 .chaos-val{color:var(--accent);font-weight:600}
 .listings-low{color:var(--red);font-weight:600}.listings-mid{color:var(--yellow)}.listings-ok{color:var(--muted)}
+.conf-low{color:var(--red);font-weight:600;font-size:10px}.conf-mid{color:var(--yellow);font-size:10px}.conf-ok{color:var(--green);font-size:10px}
+.conf-bar{display:inline-block;width:40px;height:4px;background:var(--border);border-radius:2px;overflow:hidden;vertical-align:middle;margin-left:4px}
+.conf-fill{height:100%;border-radius:2px}
+.trade-links{display:flex;gap:4px;align-items:center}
+.trade-link-ninja{font-size:10px;color:var(--muted);text-decoration:none;padding:2px 5px;border-radius:3px;border:1px solid var(--border);transition:all .15s;cursor:pointer;white-space:nowrap}
+.trade-link-ninja:hover{color:var(--blue);border-color:var(--blue)}
 .score-wrap,.demand-wrap{display:flex;align-items:center;gap:6px}
 .score-bar,.demand-bar{width:50px;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
 .score-fill,.demand-fill{height:100%;border-radius:3px}
@@ -1101,14 +1265,14 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
       <button class="pro-toggle-btn active" onclick="setProMode(false)">Simple</button>
       <button class="pro-toggle-btn" onclick="setProMode(true)">Pro</button>
     </div>
-    <button class="refresh-btn" onclick="document.getElementById('refreshModal').classList.add('show')">&#8635; Refresh Data</button>
+    <button class="refresh-btn" id="refreshBtn" onclick="doRefresh()">&#8635; Refresh Data</button>
   </div>
   <span class="meta">TIMESTAMP &middot; LEAGUE_NAME &middot; PREV_STATUS</span>
 </header>
 <div class="refresh-modal-overlay" id="refreshModal" onclick="if(event.target===this)this.classList.remove('show')">
   <div class="refresh-modal">
-    <h3>&#8635; Refresh Data</h3>
-    <p>Run <code>python poe_dashboard.py</code> in your terminal to refresh.<br><br>This page is a static report &mdash; refresh regenerates it with live data.</p>
+    <h3 id="refreshTitle">&#8635; Refresh Data</h3>
+    <p id="refreshMsg">Run <code>python poe_dashboard.py</code> in your terminal to refresh.<br><br>Or use <code>python poe_dashboard.py --serve</code> for live refresh.</p>
     <button onclick="document.getElementById('refreshModal').classList.remove('show')">Got it</button>
   </div>
 </div>
@@ -1202,6 +1366,16 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 </div>
 
 <script>
+const SERVE_MODE=SERVE_MODE_FLAG;
+function doRefresh(){
+  if(SERVE_MODE){
+    const btn=document.getElementById('refreshBtn');
+    btn.textContent='Refreshing...';btn.style.color='var(--accent)';btn.disabled=true;
+    fetch('/refresh').then(r=>{if(r.ok){btn.textContent='Done! Reloading...';setTimeout(()=>location.reload(),500);}else{btn.textContent='Error — retry';btn.disabled=false;}}).catch(()=>{btn.textContent='Error — retry';btn.disabled=false;btn.style.color='var(--red)';});
+  } else {
+    document.getElementById('refreshModal').classList.add('show');
+  }
+}
 const DATA=ALL_DATA_JSON, FLIPS=ALL_FLIPS_JSON, DIV_RATIO=DIV_RATIO_NUM, LEAGUE='LEAGUE_NAME';
 const CURRENCIES=ALL_CURRENCY_JSON;
 const ARB_LOOPS=ALL_ARB_JSON;
@@ -1226,6 +1400,9 @@ function setProMode(v){
 }
 
 function tradeUrl(n,c){return c?`https://poe.ninja/economy/${LEAGUE.toLowerCase()}/${c}?name=${encodeURIComponent(n)}`:`https://poe.ninja/economy/${LEAGUE.toLowerCase()}?name=${encodeURIComponent(n)}`;}
+function tradeUrlOfficial(n){return `https://www.pathofexile.com/trade/search/${LEAGUE}?q={"query":{"term":"${encodeURIComponent(n)}"}}`;}
+function confColor(c){return c<=25?'var(--red)':c<=50?'var(--yellow)':'var(--green)';}
+function confLabel(c){return c<=25?'Unreliable':c<=50?'Low confidence':c<=70?'Moderate':'Reliable';}
 function sparkSvg(d){if(!d||d.length<2)return'';const w=70,h=18,p=2,mn=Math.min(...d),mx=Math.max(...d),r=mx-mn||1;const pts=d.map((v,i)=>`${(p+i/(d.length-1)*(w-p*2)).toFixed(1)},${(p+(1-(v-mn)/r)*(h-p*2)).toFixed(1)}`);const c=d[d.length-1]>=d[0]?'#4CAF82':'#e05555';return `<svg class="spark-svg" width="${w}" height="${h}"><polyline points="${pts.join(' ')}" fill="none" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/></svg>`;}
 function esc(s){return typeof s!=='string'?s:s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function dc(d){return d>=60?'#e05555':d>=30?'#d4a017':'#5b9bd5';}
@@ -1235,12 +1412,12 @@ function fmt(c){return c>=1000?(c/1000).toFixed(1)+'k':c.toLocaleString();}
 function alertBadge(a,p){if(!a)return'';const m={spike:['SPIKE','alert-spike'],crash:['CRASH','alert-crash'],drying:['DRYING','alert-drying'],flood:['FLOOD','alert-flood'],'new':['NEW','alert-new'],underpriced:['UNDERPRICED','alert-underpriced'],meta_spike:['META SPIKE','alert-meta_spike'],corner_risk:['CORNER RISK','alert-corner_risk']};const v=m[a];return v?`<span class="badge-alert ${v[1]}">${v[0]}</span>`:'';}
 
 const HINTS={
-  economy:'<ul><li>Sort by Demand to find hot items.</li><li>Use "Underpriced" filter to find buy-low opportunities.</li><li>Click Trade to open poe.ninja listings.</li></ul>',
+  economy:'<ul><li>Sort by Demand to find hot items.</li><li>Use "Underpriced" filter to find buy-low opportunities.</li><li>Click Trade to open official trade site, or ninja for poe.ninja.</li><li>⚠ on price = unreliable (very few listings). ~ on listings = approximate poe.ninja count.</li></ul>',
   craft:'<ul><li>Set "Min profit" to filter noise.</li><li>Use "Meta only" for guaranteed demand.</li><li>Higher risk = higher variance, not guaranteed profit.</li></ul>',
   suggest:'<ul><li>Gold #1 = highest expected profit.</li><li>Compare risk levels before committing.</li><li>Underpriced + high demand = best targets.</li></ul>',
   flip:'<ul><li>6-Link spreads are safest.</li><li>Check listing counts — more listings = easier to execute.</li><li>Start with small flips.</li></ul>',
   budget:'<ul><li>Enter your total available chaos.</li><li>The plan optimizes for best ROI.</li><li>Meta-only mode ensures items actually sell.</li></ul>',
-  whale:'<ul><li>Filter "Cornerable only" + sort by corner score.</li><li>Items with meta build badges have guaranteed demand.</li><li>Start small — corner 1-2 items first.</li></ul>',
+  whale:'<ul><li>Filter "Cornerable only" + sort by corner score.</li><li>Items with meta build badges have guaranteed demand.</li><li>Start small — corner 1-2 items first.</li><li>⚠ = unreliable price. Always verify on the official trade site before buying.</li></ul>',
   currency:'<ul><li>Only shows currencies with real exchange pairs (3+ listings both sides).</li><li>Spread &gt;3% = profitable to flip.</li><li>Volume matters — more listings = sustainable.</li></ul>',
   z2m:'<ul><li>Uncheck strategies you don\'t want to use.</li><li>Phase 1 items are your starting point.</li><li>Each phase builds on the previous.</li></ul>',
   alerts:'<ul><li>Run the script twice (morning + evening) for meaningful alerts.</li><li>UNDERPRICED alerts are your best buy signals.</li><li>CORNER RISK means someone may be manipulating supply.</li></ul>',
@@ -1257,17 +1434,17 @@ function toggleHint(m){
 
 function fmtCell(f,val,row){
   switch(f){
-    case 'name':{const p=[`<span>${esc(val)}</span>`];if(proMode){if(row.score>=60)p.push('<span class="badge badge-hot">HOT</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%under</span>`);if(row.alert)p.push(alertBadge(row.alert,row.price_change));}return `<div class="name-cell">${p.join('')}</div>`;}
-    case 'craft_name':{const p=[`<span>${esc(val)}</span>`];if(proMode){if(row.builds&&row.builds.length)row.builds.forEach(b=>p.push(`<span class="badge badge-build">${esc(b)}</span>`));if(row.links>=6)p.push('<span class="badge badge-6l">6L</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%</span>`);}return `<div class="name-cell">${p.join('')}</div>`;}
+    case 'name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable — very few listings">⚠ price</span>');if(row.score>=60)p.push('<span class="badge badge-hot">HOT</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%under</span>`);if(row.alert)p.push(alertBadge(row.alert,row.price_change));}return `<div class="name-cell">${p.join('')}</div>`;}
+    case 'craft_name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable">⚠</span>');if(row.builds&&row.builds.length)row.builds.forEach(b=>p.push(`<span class="badge badge-build">${esc(b)}</span>`));if(row.links>=6)p.push('<span class="badge badge-6l">6L</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%</span>`);}return `<div class="name-cell">${p.join('')}</div>`;}
     case 'type_label':return TL[val]||val||'-';
     case 'tier':return `<span class="tier-badge" style="color:${row.tier_color};border-color:${row.tier_color}30;background:${row.tier_color}18">${esc(val)}</span>`;
     case 'links':return val>=6?'<span class="badge badge-6l">6L</span>':val>0?val+'L':'-';
-    case 'chaos':return `<span class="chaos-val">${fmt(val)}c</span>`;
-    case 'listings':{const c=val<=5?'listings-low':val<=20?'listings-mid':'listings-ok';return `<span class="${c}">${val}</span>`;}
+    case 'chaos':{const cf=row.confidence||95;const warn=cf<=25?` <span class="conf-low" title="${confLabel(cf)} price (${cf}/100) — only ${row.listings} on poe.ninja">⚠</span>`:cf<=50?` <span class="conf-mid" title="${confLabel(cf)} (${cf}/100)">~</span>`:'';return `<span class="chaos-val">${fmt(val)}c</span>${warn}`;}
+    case 'listings':{const c=val<=5?'listings-low':val<=20?'listings-mid':'listings-ok';const tip=val<=3?' title="poe.ninja count — check trade site for actual listings"':'';return `<span class="${c}"${tip}>~${val}</span>`;}
     case 'demand':{const c=dc(val);const cl=val>=60?'demand-high':val>=30?'demand-mid':'demand-low';return `<div class="demand-wrap"><div class="demand-bar"><div class="demand-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="${cl}" style="font-size:11px">${val}</span></div>`;}
     case 'score':{const c=sc(val);return `<div class="score-wrap"><div class="score-bar"><div class="score-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="score-num">${val}</span></div>`;}
     case 'spark':return sparkSvg(val);
-    case 'trade':return `<a class="trade-link" href="${tradeUrl(row.name,row.trade_cat)}" target="_blank" rel="noopener">Trade &#10148;</a>`;
+    case 'trade':return `<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(row.name)}" target="_blank" rel="noopener">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(row.name,row.trade_cat)}" target="_blank" rel="noopener">ninja</a></div>`;
     case 'method':return val?`<span class="craft-method-badge method-${val}">${ML[val]||val}</span>`:'-';
     case 'craft_action':return val?`<span class="craft-action">${esc(val)}</span>`:'-';
     case 'craft_reason':return val?`<span class="craft-reason">${esc(val)}</span>`:'-';
@@ -1374,10 +1551,10 @@ function renderFlip(){
   g.innerHTML=items.slice(0,80).map(f=>{
     if(!proMode){
       /* Simple mode: name, buy, sell, profit, trade */
-      return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><a class="trade-link" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">Trade &#10148;</a></div></div>`;
+      return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;
     }
     const badges=[];if(f.builds&&f.builds.length)f.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));
-    return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<a class="trade-link" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">Trade &#10148;</a></div></div>`;
+    return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;
   }).join('');
 }
 function renderBudget(){
@@ -1397,7 +1574,7 @@ function calcBudget(){
   const roi=ts>0?Math.round(tp/ts*100):0;
   const r=document.getElementById('budgetResults');
   if(!plan.length){r.innerHTML='<div class="empty">No profitable crafts found. Try increasing budget.</div>';return;}
-  r.innerHTML=`<div class="budget-summary"><div class="budget-summary-item"><div class="budget-summary-label">Budget</div><div class="budget-summary-val">${fmt(budget)}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Spent</div><div class="budget-summary-val">${fmt(Math.round(ts))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Profit</div><div class="budget-summary-val" style="color:var(--green)">+${fmt(Math.round(tp))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">ROI</div><div class="budget-summary-val">${roi}%</div></div><div class="budget-summary-item"><div class="budget-summary-label">Left</div><div class="budget-summary-val" style="color:var(--muted)">${fmt(rem)}c</div></div></div><div class="budget-plan" style="margin-top:14px">${plan.map((p,i)=>{const bg=[];if(p.builds&&p.builds.length)p.builds.forEach(b=>bg.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="budget-item"><div class="budget-item-left"><span class="budget-step">${i+1}</span><span class="budget-item-name">${esc(p.name)}</span><span class="craft-method-badge method-${p.craft_method}">${ML[p.craft_method]||p.craft_method}</span>${bg.join('')}</div><div class="budget-item-right"><span style="font-size:12px;color:var(--muted)">Buy: <span class="chaos-val">${fmt(p.chaos)}c</span></span><span style="font-size:12px;color:var(--muted)">${esc(p.craft_action)}</span><span class="profit-positive">+${fmt(p.craft_profit)}c</span><a class="trade-link" href="${tradeUrl(p.name,p.trade_cat)}" target="_blank">Buy &#10148;</a></div></div>`;}).join('')}</div>`;
+  r.innerHTML=`<div class="budget-summary"><div class="budget-summary-item"><div class="budget-summary-label">Budget</div><div class="budget-summary-val">${fmt(budget)}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Spent</div><div class="budget-summary-val">${fmt(Math.round(ts))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Profit</div><div class="budget-summary-val" style="color:var(--green)">+${fmt(Math.round(tp))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">ROI</div><div class="budget-summary-val">${roi}%</div></div><div class="budget-summary-item"><div class="budget-summary-label">Left</div><div class="budget-summary-val" style="color:var(--muted)">${fmt(rem)}c</div></div></div><div class="budget-plan" style="margin-top:14px">${plan.map((p,i)=>{const bg=[];if(p.builds&&p.builds.length)p.builds.forEach(b=>bg.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="budget-item"><div class="budget-item-left"><span class="budget-step">${i+1}</span><span class="budget-item-name">${esc(p.name)}</span><span class="craft-method-badge method-${p.craft_method}">${ML[p.craft_method]||p.craft_method}</span>${bg.join('')}</div><div class="budget-item-right"><span style="font-size:12px;color:var(--muted)">Buy: <span class="chaos-val">${fmt(p.chaos)}c</span></span><span style="font-size:12px;color:var(--muted)">${esc(p.craft_action)}</span><span class="profit-positive">+${fmt(p.craft_profit)}c</span><a class="trade-link" href="${tradeUrlOfficial(p.name)}" target="_blank">Buy &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(p.name,p.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('')}</div>`;
 }
 function renderAlerts(){
   const af=document.getElementById('alertType').value,q=document.getElementById('alertSearch').value.toLowerCase();
@@ -1436,23 +1613,25 @@ function renderCurrency(){
   const profitable=CURRENCIES.filter(c=>c.spread>3).length;
   document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Currencies</div><div class="stat-val">${CURRENCIES.length}</div></div><div class="stat-card"><div class="stat-label">Profitable (&gt;3%)</div><div class="stat-val" style="color:var(--green)">${profitable}</div></div><div class="stat-card"><div class="stat-label">Arb Loops</div><div class="stat-val" style="color:var(--purple)">${ARB_LOOPS.length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${clist.length}</div></div>`;
 
-  /* Currency table */
-  const cols=[{key:'name',label:'Currency'},{key:'chaos_eq',label:'Chaos Value'},{key:'buy_price',label:'Buy Price'},{key:'sell_price',label:'Sell Price'},{key:'spread',label:'Spread %'},{key:'profit',label:'Profit/Trade'}];
+  /* Currency table — show real exchange ratios */
+  const cols=[{key:'name',label:'Currency'},{key:'chaos_eq',label:'Value'},{key:'display_buy',label:'Buy Rate'},{key:'display_sell',label:'Sell Rate'},{key:'spread',label:'Spread'},{key:'volume',label:'Volume'},{key:'reliable',label:''}];
   document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';
-  if(!clist.length){document.getElementById('tbody').innerHTML='<tr><td colspan="6" class="empty">No currencies match</td></tr>';}
+  if(!clist.length){document.getElementById('tbody').innerHTML='<tr><td colspan="7" class="empty">No currencies match</td></tr>';}
   else{
     document.getElementById('tbody').innerHTML=clist.slice(0,100).map(c=>{
-      const hl=c.spread>3?' class="currency-highlight"':'';
-      return `<tr${hl}><td><strong>${esc(c.name)}</strong></td><td><span class="chaos-val">${c.chaos_eq}c</span></td><td>${c.buy_price}c</td><td>${c.sell_price}c</td><td><span style="color:${c.spread>3?'var(--green)':c.spread>0?'var(--yellow)':'var(--muted)'};font-weight:600">${c.spread}%</span></td><td><span class="${c.profit>0?'profit-positive':''}">${c.profit>0?'+':''}${c.profit}c</span></td></tr>`;
+      const spreadColor=c.spread>5&&c.reliable==='yes'?'var(--green)':c.spread>2?'var(--yellow)':'var(--muted)';
+      const reliableTag=c.reliable==='check'?'<span style="color:var(--red);font-size:10px" title="Spread looks too high — verify in-game before trading">⚠ verify</span>':'';
+      return `<tr><td><strong>${esc(c.name)}</strong></td><td><span class="chaos-val">${c.chaos_eq}c</span></td><td style="font-size:12px">${esc(c.display_buy)}</td><td style="font-size:12px">${esc(c.display_sell)}</td><td><span style="color:${spreadColor};font-weight:600">${c.spread}%</span></td><td style="color:var(--muted)">${c.volume}</td><td>${reliableTag}</td></tr>`;
     }).join('');
   }
 
-  /* Arbitrage opportunities (direct buy/sell spread) */
+  /* Arbitrage — only reliable spreads */
   const ca=document.getElementById('currencyArea');
+  ca.innerHTML='<div style="margin:1rem 0 .5rem;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);line-height:1.6"><strong style="color:var(--yellow)">⚠ Important:</strong> poe.ninja ratios are averages, not exact listings. Always verify the actual buy/sell ratio in-game before flipping. Real spreads are tighter than shown. Look for currencies where you can buy at X:1c and sell at a lower ratio for profit.</div>';
   if(ARB_LOOPS.length>0){
-    ca.innerHTML='<h3 style="margin:1rem 0 .5rem;color:var(--accent);font-size:15px">Profitable Currency Flips (buy/sell spread)</h3>'+ARB_LOOPS.map(l=>`<div class="arb-card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><span class="arb-path"><strong>${esc(l.name)}</strong></span><span class="arb-profit">+${l.spread}% spread</span></div><div class="arb-detail">${esc(l.invest_100c)}</div><div style="display:flex;gap:12px;margin-top:4px;font-size:12px;color:var(--muted)"><span>Net per 100c: <strong class="profit-positive">+${l.net_profit}c</strong></span><span>Volume: ${l.volume} listings</span></div></div>`).join('');
+    ca.innerHTML+='<h3 style="margin:1rem 0 .5rem;color:var(--accent);font-size:15px">Potential Currency Flips (verify in-game)</h3>'+ARB_LOOPS.map(l=>`<div class="arb-card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><span class="arb-path"><strong>${esc(l.name)}</strong></span><span class="arb-profit">${l.spread.toFixed(1)}% spread</span></div><div class="arb-detail">${esc(l.desc)}</div><div style="display:flex;gap:12px;margin-top:4px;font-size:12px;color:var(--muted)"><span>Volume: ${l.volume} listings</span></div></div>`).join('');
   } else {
-    ca.innerHTML='<div class="empty" style="margin-top:1rem">No profitable currency flips detected (need >2% spread with 5+ listings).</div>';
+    ca.innerHTML+='<div class="empty" style="margin-top:1rem">No reliable currency flips found (need 2-20% spread with 5+ listings).</div>';
   }
 }
 
@@ -1522,10 +1701,14 @@ function calcZ2M(){
         candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:'Level/quality gem',type:'gem'});
       });
     }
-    /* From currency flips */
+    /* From currency flips — only reliable ones with realistic spreads */
     if(useCurrency){
-      CURRENCIES.filter(c=>c.spread>3&&c.buy_price>=minBuy*0.5&&c.buy_price<=maxBuy).forEach(c=>{
-        candidates.push({name:c.name+' flip',buy:Math.round(c.buy_price),sell:Math.round(c.sell_price),profit:Math.round(c.profit),action:'Currency exchange '+c.spread+'% spread',type:'currency'});
+      CURRENCIES.filter(c=>c.spread>2&&c.spread<20&&c.reliable==='yes'&&c.chaos_eq>=0.1).forEach(c=>{
+        const investAmt=Math.max(minBuy,50);
+        const profitPerCycle=Math.round(investAmt*c.spread/100);
+        if(profitPerCycle>0){
+          candidates.push({name:c.name+' exchange',buy:investAmt,sell:investAmt+profitPerCycle,profit:profitPerCycle,action:'Buy/sell '+c.name+' ('+c.spread+'% spread, verify in-game)',type:'currency'});
+        }
       });
     }
     candidates.sort((a,b)=>{
@@ -1645,29 +1828,39 @@ function renderWhale(){
     // Strategy pills
     const stratPills=w.strategies.map(s=>`<span style="display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin:2px;background:${stratColors[s.id]||'var(--muted)'}20;color:${stratColors[s.id]||'var(--muted)'};border:1px solid ${stratColors[s.id]||'var(--muted)'}40">${stratNames[s.id]||s.id} +${fmt(s.profit)}c</span>`).join('');
 
-    // Listings warning
+    // Listings warning + confidence
     const listColor=w.listings<=3?'var(--red)':w.listings<=10?'var(--yellow)':'var(--muted)';
     const listWarn=w.listings<=5?'<span style="font-size:10px;color:var(--red);font-weight:600"> LOW SUPPLY</span>':'';
+    const cf=w.confidence||95;
+    const confHtml=cf<=50?`<div style="display:flex;align-items:center;gap:4px;margin:2px 0"><span style="font-size:10px;color:${confColor(cf)};font-weight:600">${confLabel(cf)} price</span><div class="conf-bar"><div class="conf-fill" style="width:${cf}%;background:${confColor(cf)}"></div></div></div>`:'';
+
+    // Why this item
+    const reasonHtml=w.item_reason?`<div style="font-size:11px;color:var(--blue);margin-bottom:6px;padding:4px 8px;background:var(--blue)10;border-radius:4px;border-left:3px solid var(--blue)">${esc(w.item_reason)}</div>`:'';
 
     return `<div class="flip-card" style="border-color:${w.corner_score>50?'var(--purple)':'var(--border)'}">
       <div class="flip-header">
-        <span class="flip-name">${esc(w.name)}</span>
+        <span class="flip-name">${esc(w.name)}${w.variant?` <span style="font-size:11px;color:var(--muted);font-weight:400">(${esc(w.variant)})</span>`:''}</span>
         <span class="tier-badge" style="color:${w.tier_color};border-color:${w.tier_color}30;background:${w.tier_color}18">${esc(w.tier_label)}</span>
       </div>
-      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-        <span class="chaos-val" style="font-size:16px">${fmt(w.chaos)}c</span>
-        <span style="font-size:12px;color:${listColor}">${w.listings} listed${listWarn}</span>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <span class="chaos-val" style="font-size:16px">${fmt(w.chaos)}c</span>${cf<=25?'<span style="font-size:10px;color:var(--red);font-weight:600" title="Very few listings on poe.ninja — price may not reflect actual market"> ⚠</span>':''}
+        <span style="font-size:12px;color:${listColor};font-weight:600" title="Approximate count from poe.ninja — check trade site for real listings">~${w.listings} listed${listWarn}</span>
         <span style="font-size:12px;color:var(--muted)">${TL[w.type]||w.type}</span>
         ${badges.join('')}
       </div>
+      ${confHtml}
+      ${reasonHtml}
       ${cornerHtml}
-      <div style="margin:8px 0"><strong style="font-size:12px;color:var(--accent)">Best:</strong> <span style="font-size:13px">${esc(w.best_detail)}</span></div>
-      <div style="display:flex;align-items:center;gap:8px;margin:8px 0">
-        <span style="font-size:11px;color:var(--muted)">Cost:</span><span class="chaos-val">${fmt(w.best_cost)}c</span>
-        <span style="font-size:11px;color:var(--muted)">Profit:</span><span class="profit-${w.best_profit>=500?'high':'positive'}">${fmt(w.best_profit)}c</span>
+      <div style="margin:8px 0;padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Best Strategy: ${stratNames[w.best_strategy]||w.best_strategy}</div>
+        <div style="font-size:12px;color:var(--text);line-height:1.5">${esc(w.best_detail)}</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
+          <span style="font-size:11px;color:var(--muted)">Cost: <span class="chaos-val">${fmt(w.best_cost)}c</span></span>
+          <span style="font-size:11px;color:var(--muted)">Expected: <span class="profit-${w.best_profit>=500?'high':'positive'}">+${fmt(w.best_profit)}c</span></span>
+        </div>
       </div>
-      <div style="margin-top:8px">${stratPills}</div>
-      <div style="margin-top:8px"><a class="trade-link" href="${tradeUrl(w.name,w.trade_cat)}" target="_blank">Trade ➜</a></div>
+      ${w.strategies.length>1?`<div style="margin-top:6px"><span style="font-size:10px;color:var(--muted)">Also viable:</span> ${stratPills}</div>`:''}
+      <div style="margin-top:8px;display:flex;gap:6px;align-items:center"><a class="trade-link" href="${tradeUrlOfficial(w.name)}" target="_blank">Trade ➜</a><a class="trade-link-ninja" href="${tradeUrl(w.name,w.trade_cat)}" target="_blank">ninja</a></div>
     </div>`;
   }).join('');
 }
@@ -1775,6 +1968,7 @@ def main():
     html = html.replace("MIRROR_PRICE_NUM", str(mirror_price))
     html = html.replace("DIV_RATIO_VALUE", str(div_ratio))
     html = html.replace("DIV_RATIO_NUM", str(div_ratio))
+    html = html.replace("SERVE_MODE_FLAG", "false")
     html = html.replace("PREV_STATUS", prev_status)
     html = html.replace("TIMESTAMP", timestamp)
     html = html.replace("LEAGUE_NAME", LEAGUE)
@@ -1786,5 +1980,74 @@ def main():
     print(f"  -> {os.path.abspath('poe_dashboard.html')}\n")
 
 
-if __name__ == "__main__":
+def generate_html(serve_mode=False):
+    """Run main() and return the generated HTML string."""
     main()
+    with open("poe_dashboard.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    if serve_mode:
+        # main() set it to false, flip it to true for serve mode
+        html = html.replace("const SERVE_MODE=false", "const SERVE_MODE=true")
+    return html
+
+
+def serve():
+    """Start a local HTTP server with live refresh."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import webbrowser
+
+    PORT = 5000
+    html_cache = {"html": ""}
+
+    def rebuild():
+        print("\n  Rebuilding dashboard...\n")
+        html_cache["html"] = generate_html(serve_mode=True)
+        print(f"  Server running at http://localhost:{PORT}\n")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/refresh":
+                try:
+                    rebuild()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"OK")
+                except Exception as e:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(str(e).encode())
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(html_cache["html"].encode("utf-8"))
+
+        def log_message(self, format, *args):
+            pass  # Suppress request logs
+
+    # Initial build
+    rebuild()
+
+    server = HTTPServer(("localhost", PORT), Handler)
+    print(f"  ================================================")
+    print(f"  PoE Dashboard LIVE at http://localhost:{PORT}")
+    print(f"  Click 'Refresh Data' in the page to re-fetch")
+    print(f"  Press Ctrl+C to stop")
+    print(f"  ================================================\n")
+
+    webbrowser.open(f"http://localhost:{PORT}")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Server stopped.")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    if "--serve" in sys.argv:
+        serve()
+    else:
+        main()
