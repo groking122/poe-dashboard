@@ -1741,7 +1741,7 @@ const ML={'6-link':'6-Link','corrupt':'Corrupt','double_corrupt':'Dbl Corrupt','
 const TYPES=[...new Set(DATA.map(d=>d.type))];let activeType=TYPES[0],sortKey='chaos',sortDir=-1;
 function setProMode(v){proMode=v;const btns=document.querySelectorAll('.pro-toggle-btn');btns[0].classList.toggle('active',!v);btns[1].classList.toggle('active',v);render();}
 function tradeUrl(n,c){return c?`https://poe.ninja/economy/${LEAGUE.toLowerCase()}/${c}?name=${encodeURIComponent(n)}`:`https://poe.ninja/economy/${LEAGUE.toLowerCase()}?name=${encodeURIComponent(n)}`;}
-function tradeUrlOfficial(n){return `https://www.pathofexile.com/trade/search/${LEAGUE}?q={"query":{"term":"${encodeURIComponent(n)}"}}`;}
+function tradeUrlOfficial(n){return `https://www.pathofexile.com/trade/search/${LEAGUE}?q=${encodeURIComponent(JSON.stringify({query:{name:n,status:{option:"online"}}}))}`;}
 function confColor(c){return c<=25?'var(--red)':c<=50?'var(--yellow)':'var(--green)';}
 function confLabel(c){return c<=25?'Unreliable':c<=50?'Low confidence':c<=70?'Moderate':'Reliable';}
 function sparkSvg(d){if(!d||d.length<2)return'';const w=70,h=18,p=2,mn=Math.min(...d),mx=Math.max(...d),r=mx-mn||1;const pts=d.map((v,i)=>`${(p+i/(d.length-1)*(w-p*2)).toFixed(1)},${(p+(1-(v-mn)/r)*(h-p*2)).toFixed(1)}`);const c=d[d.length-1]>=d[0]?'#4CAF82':'#e05555';return `<svg class="spark-svg" width="${w}" height="${h}"><polyline points="${pts.join(' ')}" fill="none" stroke="${c}" stroke-width="1.5" stroke-linecap="round"/></svg>`;}
