@@ -15,6 +15,7 @@ Open: http://localhost:5000 (serve mode) or poe_dashboard.html (static mode)
 
 import urllib.request
 import json
+import math
 import os
 import sys
 import glob as globmod
@@ -304,13 +305,50 @@ def fetch_mirror_price():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def opportunity_score(item):
+    """Score 0-100 for trading opportunity.
+
+    Old formula was 60% raw price + 40% scarcity — this made expensive
+    illiquid items score highest even when unsellable.
+
+    New formula weights:
+      - Liquidity (35%): can you actually buy AND sell this?
+      - Value floor (25%): is it worth your time at all?
+      - Scarcity (25%): is there real supply tension?
+      - Sparkline velocity (15%): is the price actually moving up?
+    Items with <5 listings are penalised hard (phantom opportunities).
+    """
     chaos = item.get("chaosValue", 0) or 0
     listings = item.get("listingCount", 999) or 999
     if chaos < 50:
         return 0
-    value_score = min(chaos / 10000, 1.0)
-    scarcity_score = max(0, 1 - listings / 100)
-    return round((value_score * 0.6 + scarcity_score * 0.4) * 100)
+
+    # Liquidity: sweet spot is 5-30 listings (buyable AND scarce)
+    # <5 = can't execute; >100 = too competitive, margins crushed
+    if listings < 5:
+        liq = max(0, listings / 5) * 0.5   # severe penalty — phantom supply
+    elif listings <= 30:
+        liq = 0.8 + (listings - 5) / 25 * 0.2  # ramp to 1.0
+    elif listings <= 100:
+        liq = 1.0 - (listings - 30) / 70 * 0.5  # decay to 0.5
+    else:
+        liq = max(0.1, 0.5 - (listings - 100) / 400)
+
+    # Value floor: log scale so 500c isn't 20x better than 5000c
+    value = min(math.log10(max(chaos, 50)) / math.log10(10000), 1.0)
+
+    # Scarcity (kept simpler)
+    scarcity = max(0, 1 - listings / 80)
+
+    # Sparkline velocity: use % change across last 3 non-zero points
+    spark_data = (item.get("sparkline", {}) or {}).get("data", []) or []
+    velocity = 0.5  # neutral default
+    pts = [v for v in spark_data if v and v > 0]
+    if len(pts) >= 2:
+        pct_change = (pts[-1] - pts[0]) / pts[0] if pts[0] > 0 else 0
+        velocity = min(max(0.5 + pct_change * 2, 0), 1.0)
+
+    raw = (liq * 0.35 + value * 0.25 + scarcity * 0.25 + velocity * 0.15) * 100
+    return round(raw)
 
 
 def get_tier(chaos, div_ratio):
@@ -325,23 +363,37 @@ def get_tier(chaos, div_ratio):
 
 
 def calc_demand(item, builds):
+    """Score 0-100 combining scarcity, price trend, and build usage.
+
+    Critical bug fixed: old code averaged the last 3 sparkline VALUES
+    (raw chaos prices like [180, 195, 200]) and compared them to thresholds
+    like ">10" or ">2". A 180c item always scored max trend. The sparkline
+    data IS the price history — we need % change, not raw values.
+    """
     listings = item.get("listingCount", 0) or 0
     sparkline = item.get("sparkline", {}) or {}
     spark_data = sparkline.get("data", []) or []
+
     if listings == 0:     scarcity = 40
     elif listings <= 5:   scarcity = 35
     elif listings <= 15:  scarcity = 28
     elif listings <= 30:  scarcity = 20
     elif listings <= 100: scarcity = 10
     else:                 scarcity = 0
+
+    # Trend: compute % price change across the sparkline window
+    # Use only non-zero/non-None points to avoid stale-data noise
     trend = 0
-    if len(spark_data) >= 3:
-        avg = sum(spark_data[-3:]) / 3
-        if avg > 10:   trend = 35
-        elif avg > 5:  trend = 28
-        elif avg > 2:  trend = 20
-        elif avg > 0:  trend = 10
-        elif avg > -2: trend = 5
+    pts = [v for v in spark_data if v is not None and v > 0]
+    if len(pts) >= 2:
+        pct = (pts[-1] - pts[0]) / pts[0] * 100  # total % change over window
+        if pct > 20:    trend = 35
+        elif pct > 10:  trend = 28
+        elif pct > 5:   trend = 20
+        elif pct > 0:   trend = 10
+        elif pct > -5:  trend = 5
+        # negative trend adds 0 — don't reward falling items
+
     build_score = min(len(builds) * 8, 25)
     return min(scarcity + trend + build_score, 100)
 
@@ -380,7 +432,7 @@ def init_craft_costs(div_ratio):
     })
 
 
-# ── Price lookup table (populated from raw API data before craft suggestions) ──
+# —— Price lookup table (populated from raw API data before craft suggestions) ——
 # Maps "base_name" -> list of {chaos, links, gem_level, gem_quality, variant, ...}
 PRICE_LOOKUP = {}
 
@@ -431,89 +483,121 @@ def get_craft_suggestions(name, item_type, chaos, links, listings, demand,
     is_gem = item_type == "SkillGem"
     corrupt_cost = CRAFT_COSTS_CHAOS.get("corrupt", 25)
 
-    # ── 6-linking: use REAL 6L price from poe.ninja ──
+    # —— Liquidity gate: don't suggest crafts on items we can't reliably buy ——
+    # <3 listings = might not even be purchasable; skip craft suggestions entirely
+    if listings < 3 and chaos < 500:
+        return []
+
+    # —— 6-linking: use REAL 6L price from poe.ninja ——
     if is_equip and links < 6 and chaos >= 100:
         sixl_price, sixl_listings = lookup_price(name, links=6)
-        if sixl_price and sixl_price > chaos:
+        if sixl_price and sixl_price > chaos and sixl_listings >= 2:
             link_cost = CRAFT_COSTS_CHAOS["6-link"]
             profit = round(sixl_price - chaos - link_cost)
             if profit > 0:
                 suggestions.append({"method": "6-link", "action": "6-link then sell",
-                    "reason": f"6L sells for {sixl_price}c (real price, {sixl_listings} listed). "
+                    "reason": f"6L sells for {sixl_price}c ({sixl_listings} listed). "
                               f"Buy {links}L at {chaos}c + ~{link_cost}c linking cost",
                     "profit": profit,
                     "risk": "low" if profit > link_cost * 0.3 else "medium"})
 
-    # ── Gem corrupt to 21: use REAL 21/20 price ──
+    # —— Gem corrupt to 21: corrected EV with real probabilities ——
     if is_gem and gem_level and int(gem_level) == 20:
         lv21_price, lv21_listings = lookup_price(name, gem_level=21,
                                                   gem_quality=gem_quality or 20)
         if not lv21_price:
-            # Try without quality filter
             lv21_price, lv21_listings = lookup_price(name, gem_level=21)
         if lv21_price:
-            # Vaal orb outcomes: 1/8 chance level+1, 1/8 level-1,
-            # 1/4 add/change quality, 1/4 nothing, 1/8 brick to random gem
-            # EV = 0.125 * lv21_price + 0.125 * (chaos*0.3) + 0.25 * (chaos*0.8)
-            #    + 0.25 * chaos + 0.25 * 0 (brick)
-            ev = (0.125 * lv21_price +      # +1 level
-                  0.125 * chaos * 0.3 +      # -1 level (nearly worthless)
-                  0.25 * chaos * 0.8 +       # quality change (slight loss)
-                  0.25 * chaos +             # nothing happens
-                  0.25 * 0)                  # brick to random gem
+            # Correct Vaal Orb outcomes on 20/20 gem:
+            #   1/8  (12.5%) → level 21 (the jackpot)
+            #   1/8  (12.5%) → level 19 (nearly worthless, ~5% of base)
+            #   1/4  (25%)   → quality change (±10-20%, model as 0.9x)
+            #   1/4  (25%)   → no change (1.0x)
+            #   1/4  (25%)   → white sockets (not 0.3x! white sockets on a
+            #                   corrupted gem are worth ~0 — gem is corrupted
+            #                   AND sockets can't be recoloured, so gem is
+            #                   usually vendor trash unless it's a 6-link body)
+            #                   Model as 0.05x (near-zero).
+            ev = (0.125 * lv21_price +      # +1 level → the real prize
+                  0.125 * chaos * 0.05 +    # level 19 → almost worthless
+                  0.25  * chaos * 0.9 +     # quality change → slight loss
+                  0.25  * chaos +           # nothing → neutral
+                  0.25  * chaos * 0.05)     # white sockets → near total loss
             profit = round(ev - chaos - corrupt_cost)
             if profit > 0:
                 suggestions.append({"method": "corrupt", "action": f"Vaal Orb for 21/{gem_quality or 20}",
                     "reason": f"21/{gem_quality or 20} sells for {lv21_price}c ({lv21_listings} listed). "
-                              f"12.5% chance. EV per attempt: {round(ev)}c",
+                              f"12.5% chance. Real EV per attempt: {round(ev)}c "
+                              f"(25% near-total loss on white sockets — not 30% as commonly stated)",
                     "profit": profit, "risk": "medium"})
             elif lv21_price > chaos:
-                # Still show it but mark as negative EV
                 suggestions.append({"method": "corrupt", "action": f"Vaal Orb for 21/{gem_quality or 20}",
-                    "reason": f"21/{gem_quality or 20} = {lv21_price}c but EV is negative. "
-                              f"Only {round((lv21_price/chaos - 1)*100)}% premium vs 12.5% hit rate. Skip unless gambling",
+                    "reason": f"21/{gem_quality or 20} = {lv21_price}c but EV is NEGATIVE ({round(ev)}c vs {chaos}c paid). "
+                              f"Only {round((lv21_price/chaos - 1)*100)}% premium vs 12.5% hit rate and 25% white socket wipe. Skip.",
                     "profit": 0, "risk": "high"})
         elif chaos >= 200:
-            # No 21 data at all — warn user
             suggestions.append({"method": "corrupt", "action": "Vaal Orb (no 21 data)",
                 "reason": "No 21/20 price data on poe.ninja — cannot calculate profit. Check trade site manually",
                 "profit": 0, "risk": "high"})
 
-    # ── Double corrupt: conservative estimate ──
+    # —— Double corrupt: corrected EV (the chaos cost is your ENTIRE position) ——
     if is_equip and chaos >= 300:
         dc_cost = CRAFT_COSTS_CHAOS["double_corrupt"]
-        # 25% two good implicits, 25% one good, 25% bad, 25% brick
-        # Very hard to price without actual data — use conservative 15% chance of 2x
-        ev = chaos * (0.15 * 2.0 + 0.25 * 1.0 + 0.35 * 0.5 + 0.25 * 0)
-        profit = round(ev - chaos - dc_cost)
+        # The item itself is consumed. EV must beat (chaos + dc_cost) to profit.
+        # Outcomes:
+        #   15% GG double implicit → item worth ~2.5x (conservative — real GG is 3-5x
+        #      but we model the floor of "2 decent implicits" not the ceiling)
+        #   25% one good implicit → item worth ~1.5x
+        #   35% one bad/useless implicit → item worth ~0.6x (corrupted, less trade)
+        #   25% bricked → 0 (corrupted mods make item unsellable or ~5c vendor)
+        total_cost = chaos + dc_cost
+        ev = (0.15 * chaos * 2.5 +
+              0.25 * chaos * 1.5 +
+              0.35 * chaos * 0.6 +
+              0.25 * 0)
+        profit = round(ev - total_cost)
         if profit > 0:
             suggestions.append({"method": "double_corrupt",
                 "action": "Double corrupt unique",
-                "reason": f"~15% chance of 2x+ value. Cost: {chaos}c item + {dc_cost}c temple. "
-                          "High variance — only do if you can absorb total loss",
+                "reason": f"~15% GG double implicit (~2.5x), ~25% one good (~1.5x), "
+                          f"35% bad (0.6x), 25% brick. Total at risk: {total_cost}c. "
+                          "Only do this if you can absorb total loss",
                 "profit": profit, "risk": "high"})
 
-    # ── Corrupt jewels/accessories: ~25% chance of good implicit ──
+    # —— Corrupt jewels/accessories: FIXED EV (old formula forgot item cost) ——
     if (is_accessory or is_jewel) and chaos >= 100:
-        # Conservative: 25% chance of 30% value increase
-        ev = chaos * 0.25 * 1.3
-        profit = round(ev - corrupt_cost)
+        # You spend `chaos` to buy + `corrupt_cost` to corrupt.
+        # 25% good implicit adds ~40% value (being conservative vs old 30%)
+        # 25% nothing → item sells for same price (but now it's corrupted = harder to sell)
+        # 25% white sockets → corrupted jewel with white sockets → same value or slightly less
+        # 25% bricked → corrupted bad implicit, harder to sell, model at 0.7x
+        ev = (0.25 * chaos * 1.4 +   # good implicit
+              0.25 * chaos * 0.95 +   # nothing (corrupted item sells slightly harder)
+              0.25 * chaos * 0.95 +   # white sockets (neutral for jewels/accessories)
+              0.25 * chaos * 0.7)     # bad implicit
+        profit = round(ev - chaos - corrupt_cost)
         if profit > 0:
             suggestions.append({"method": "corrupt", "action": "Corrupt for implicit",
-                "reason": f"~25% chance of good implicit. Cost: {corrupt_cost}c. "
-                          "Good implicits can add 30%+ value",
-                "profit": profit, "risk": "low"})
+                "reason": f"25% good implicit (+40% value), 25% neutral, 25% white sockets (neutral), "
+                          f"25% bad implicit (harder sell). Cost: {corrupt_cost}c on {chaos}c item",
+                "profit": profit, "risk": "medium"})
 
-    # ── Single corrupt on equip ──
+    # —— Single corrupt on equip: same corrected EV ——
     if is_equip and chaos >= 100 and chaos < 1000:
-        ev = chaos * 0.25 * 1.3
-        profit = round(ev - corrupt_cost)
+        # White sockets on equip can be valuable (free colour = saves chromatics)
+        # so we model them at 1.1x (slight premium)
+        ev = (0.25 * chaos * 1.5 +   # good implicit
+              0.25 * chaos +          # nothing
+              0.25 * chaos * 1.1 +    # white sockets (can be a premium)
+              0.25 * chaos * 0.4)     # bricked implicit
+        profit = round(ev - chaos - corrupt_cost)
         if profit > 0:
             suggestions.append({"method": "corrupt", "action": "Single corrupt",
-                "reason": f"~25% chance of good implicit. {corrupt_cost}c cost",
-                "profit": profit, "risk": "low"})
+                "reason": f"25% good implicit (1.5x), 25% nothing, 25% white sockets (slight premium), "
+                          f"25% bad implicit (0.4x). Net EV: {round(ev)}c. Cost: {corrupt_cost}c",
+                "profit": profit, "risk": "medium"})
 
-    # ── Harvest reforge ──
+    # —— Harvest reforge ——
     if is_equip and chaos >= 500:
         harvest_cost = CRAFT_COSTS_CHAOS["harvest"]
         profit = round(chaos * 0.2 - harvest_cost)
@@ -522,7 +606,7 @@ def get_craft_suggestions(name, item_type, chaos, links, listings, demand,
                 "reason": f"Targeted reforge. ~20% avg value add, {harvest_cost}c cost",
                 "profit": profit, "risk": "medium"})
 
-    # ── Fracture (base types) ──
+    # —— Fracture (base types) ——
     if item_type == "BaseType" and chaos >= 500:
         frac_cost = CRAFT_COSTS_CHAOS["fracture"]
         ev = chaos * 0.3 * 1.5
@@ -532,7 +616,7 @@ def get_craft_suggestions(name, item_type, chaos, links, listings, demand,
                 "reason": f"~30% chance to lock good mod. Cost: {frac_cost}c",
                 "profit": profit, "risk": "high"})
 
-    # ── Essence craft (base types) ──
+    # —— Essence craft (base types) ——
     if item_type == "BaseType" and chaos >= 100:
         ess_cost = CRAFT_COSTS_CHAOS["essence"]
         profit = round(chaos * 0.2 - ess_cost)
@@ -541,7 +625,7 @@ def get_craft_suggestions(name, item_type, chaos, links, listings, demand,
                 "reason": f"Guaranteed mod. ~5 attempts avg ({ess_cost}c each) for sellable result",
                 "profit": profit, "risk": "low"})
 
-    # ── Low listings context ──
+    # —— Low listings context ——
     if listings <= 5 and chaos >= 100:
         for s in suggestions:
             if s["profit"] > 0:
@@ -647,6 +731,15 @@ def compute_underpriced(all_rows):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def find_flips(all_rows):
+    """Find executable flip opportunities.
+
+    Key fixes vs old version:
+    - Liquidity gate: both buy AND sell sides need ≥2 listings (old had none)
+    - 6-link flips use real 6L price from PRICE_LOOKUP, not chaos*1.4 estimate
+    - Price gap flips explain WHY the gap exists instead of "check rolls"
+    - Gem level gap: require sell side ≥2 listings (was zero check)
+    - Profit cap at 4x buy price (old was 5x — still too generous)
+    """
     flips = []
     by_name = {}
     for r in all_rows:
@@ -657,69 +750,96 @@ def find_flips(all_rows):
             continue
         vs = sorted(variants, key=lambda v: v["chaos"])
 
-        # Link Arbitrage
+        # —— Link Arbitrage: use REAL 6L price from lookup ——
         unlinked = [v for v in vs if v["links"] < 6 and v["type"] in ("UniqueArmour", "UniqueWeapon") and v["chaos"] > 10]
         linked = [v for v in vs if v["links"] >= 6 and v["type"] in ("UniqueArmour", "UniqueWeapon") and v["chaos"] > 10]
         if unlinked and linked:
             buy, sell = unlinked[0], linked[-1]
-            cost = CRAFT_COSTS_CHAOS.get("6-link", 300)
-            spread = sell["chaos"] - buy["chaos"] - cost
-            if spread > 50 and sell["chaos"] > buy["chaos"] * 1.3:
-                flips.append({
-                    "name": name, "flip_type": "6-Link Spread",
-                    "buy_price": buy["chaos"], "sell_price": sell["chaos"],
-                    "buy_variant": f"{buy['links'] or 0}L", "sell_variant": "6L",
-                    "cost": cost, "profit": spread,
-                    "buy_listings": buy["listings"], "sell_listings": sell["listings"],
-                    "demand": max(buy.get("demand", 0), sell.get("demand", 0)),
-                    "builds": buy.get("builds", []) or sell.get("builds", []),
-                    "type": buy["type"], "trade_cat": buy.get("trade_cat", ""),
-                    "reason": f"Buy {buy['links'] or 0}L at {buy['chaos']}c -> 6-link (~{cost}c) -> sell 6L at {sell['chaos']}c",
-                    "risk": "low" if spread > 200 else "medium",
-                })
+            # Liquidity gate: need at least 2 of each to be executable
+            if buy["listings"] >= 2 and sell["listings"] >= 2:
+                cost = CRAFT_COSTS_CHAOS.get("6-link", 300)
+                # Use real 6L price from PRICE_LOOKUP if available — more accurate than the row price
+                real_sixl, real_sixl_listings = lookup_price(name, links=6)
+                sell_price = real_sixl if (real_sixl and real_sixl_listings >= 2) else sell["chaos"]
+                spread = sell_price - buy["chaos"] - cost
+                if spread > 50 and sell_price > buy["chaos"] * 1.3:
+                    flips.append({
+                        "name": name, "flip_type": "6-Link Spread",
+                        "buy_price": buy["chaos"], "sell_price": sell_price,
+                        "buy_variant": f"{buy['links'] or 0}L", "sell_variant": "6L",
+                        "cost": cost, "profit": spread,
+                        "buy_listings": buy["listings"], "sell_listings": sell["listings"],
+                        "demand": max(buy.get("demand", 0), sell.get("demand", 0)),
+                        "builds": buy.get("builds", []) or sell.get("builds", []),
+                        "type": buy["type"], "trade_cat": buy.get("trade_cat", ""),
+                        "reason": f"Buy {buy['links'] or 0}L at {buy['chaos']}c → 6-link (~{cost}c) → sell 6L at {sell_price}c",
+                        "risk": "low" if spread > 200 else "medium",
+                    })
 
-        # Gem Level Gap
+        # —— Gem Level Gap: require liquidity on sell side ——
         gems = [v for v in vs if v["type"] == "SkillGem" and v["chaos"] > 10]
         if len(gems) >= 2:
             lo, hi = gems[0], gems[-1]
-            spread = hi["chaos"] - lo["chaos"] - CRAFT_COSTS_CHAOS.get("corrupt", 25)
-            if spread > 50 and hi["chaos"] > lo["chaos"] * 1.5:
-                buy_d = f"Lv{lo['gem_level']}" if lo["gem_level"] else "low"
-                sell_d = f"Lv{hi['gem_level']}" if hi["gem_level"] else "high"
-                if lo.get("gem_quality") != hi.get("gem_quality"):
-                    buy_d += f"/{lo['gem_quality'] or 0}%"; sell_d += f"/{hi['gem_quality'] or 0}%"
-                flips.append({
-                    "name": name, "flip_type": "Gem Level Gap",
-                    "buy_price": lo["chaos"], "sell_price": hi["chaos"],
-                    "buy_variant": buy_d, "sell_variant": sell_d,
-                    "cost": CRAFT_COSTS_CHAOS.get("corrupt", 25), "profit": spread,
-                    "buy_listings": lo["listings"], "sell_listings": hi["listings"],
-                    "demand": max(lo.get("demand", 0), hi.get("demand", 0)),
-                    "builds": lo.get("builds", []) or hi.get("builds", []),
-                    "type": "SkillGem", "trade_cat": lo.get("trade_cat", ""),
-                    "reason": f"Buy {buy_d} at {lo['chaos']}c -> level/corrupt -> sell {sell_d} at {hi['chaos']}c",
-                    "risk": "medium",
-                })
+            # Must have at least 2 of the sell-side gem in market
+            if lo["listings"] >= 3 and hi["listings"] >= 2:
+                spread = hi["chaos"] - lo["chaos"] - CRAFT_COSTS_CHAOS.get("corrupt", 25)
+                if spread > 50 and hi["chaos"] > lo["chaos"] * 1.5:
+                    buy_d = f"Lv{lo['gem_level']}" if lo["gem_level"] else "low"
+                    sell_d = f"Lv{hi['gem_level']}" if hi["gem_level"] else "high"
+                    if lo.get("gem_quality") != hi.get("gem_quality"):
+                        buy_d += f"/{lo['gem_quality'] or 0}%"; sell_d += f"/{hi['gem_quality'] or 0}%"
+                    # Calculate real EV for this corruption (not just raw spread)
+                    corrupt_cost = CRAFT_COSTS_CHAOS.get("corrupt", 25)
+                    ev = (0.125 * hi["chaos"] + 0.125 * lo["chaos"] * 0.05 +
+                          0.25 * lo["chaos"] * 0.9 + 0.25 * lo["chaos"] + 0.25 * lo["chaos"] * 0.05)
+                    ev_profit = round(ev - lo["chaos"] - corrupt_cost)
+                    flips.append({
+                        "name": name, "flip_type": "Gem Level Gap",
+                        "buy_price": lo["chaos"], "sell_price": hi["chaos"],
+                        "buy_variant": buy_d, "sell_variant": sell_d,
+                        "cost": corrupt_cost, "profit": max(spread, ev_profit),
+                        "buy_listings": lo["listings"], "sell_listings": hi["listings"],
+                        "demand": max(lo.get("demand", 0), hi.get("demand", 0)),
+                        "builds": lo.get("builds", []) or hi.get("builds", []),
+                        "type": "SkillGem", "trade_cat": lo.get("trade_cat", ""),
+                        "reason": f"Buy {buy_d} at {lo['chaos']}c → corrupt/level → sell {sell_d} at {hi['chaos']}c. Real EV profit: {ev_profit}c",
+                        "risk": "medium",
+                    })
 
-        # Price Gap (same base, big variance)
+        # —— Price Gap: explain the gap, don't just say "check rolls" ——
         non_gem = [v for v in vs if v["type"] != "SkillGem" and v["chaos"] > 50]
         if len(non_gem) >= 2:
             lo, hi = non_gem[0], non_gem[-1]
-            spread = hi["chaos"] - lo["chaos"]
-            if spread > 100 and hi["chaos"] > lo["chaos"] * 2:
-                flips.append({
-                    "name": name, "flip_type": "Price Gap",
-                    "buy_price": lo["chaos"], "sell_price": hi["chaos"],
-                    "buy_variant": f"{lo['links']}L" if lo.get("links") else "base",
-                    "sell_variant": f"{hi['links']}L" if hi.get("links") else "premium",
-                    "cost": 0, "profit": spread,
-                    "buy_listings": lo["listings"], "sell_listings": hi["listings"],
-                    "demand": max(lo.get("demand", 0), hi.get("demand", 0)),
-                    "builds": lo.get("builds", []) or hi.get("builds", []),
-                    "type": lo["type"], "trade_cat": lo.get("trade_cat", ""),
-                    "reason": f"Buy low variant at {lo['chaos']}c -> sell premium at {hi['chaos']}c (check rolls)",
-                    "risk": "medium",
-                })
+            # Liquidity gate: need real supply on both sides
+            if lo["listings"] >= 2 and hi["listings"] >= 2:
+                spread = hi["chaos"] - lo["chaos"]
+                if spread > 100 and hi["chaos"] > lo["chaos"] * 2:
+                    # Figure out WHY the gap exists
+                    lo_links = lo.get("links", 0) or 0
+                    hi_links = hi.get("links", 0) or 0
+                    lo_var = lo.get("variant", "") or ""
+                    hi_var = hi.get("variant", "") or ""
+                    if hi_links > lo_links:
+                        gap_reason = f"Link difference ({lo_links}L → {hi_links}L) drives the price gap"
+                    elif lo_var != hi_var and (lo_var or hi_var):
+                        gap_reason = f"Variant difference: '{lo_var or 'base'}' vs '{hi_var or 'premium'}' — check which mods/rolls each variant has"
+                    elif hi["chaos"] > lo["chaos"] * 3:
+                        gap_reason = "Extreme gap (>3x) — likely different item tier or roll quality. Verify before buying"
+                    else:
+                        gap_reason = "Price gap may reflect roll quality differences — inspect item mods on trade site"
+                    flips.append({
+                        "name": name, "flip_type": "Price Gap",
+                        "buy_price": lo["chaos"], "sell_price": hi["chaos"],
+                        "buy_variant": lo_var or f"{lo_links}L" or "base",
+                        "sell_variant": hi_var or f"{hi_links}L" or "premium",
+                        "cost": 0, "profit": spread,
+                        "buy_listings": lo["listings"], "sell_listings": hi["listings"],
+                        "demand": max(lo.get("demand", 0), hi.get("demand", 0)),
+                        "builds": lo.get("builds", []) or hi.get("builds", []),
+                        "type": lo["type"], "trade_cat": lo.get("trade_cat", ""),
+                        "reason": f"Buy at {lo['chaos']}c → sell at {hi['chaos']}c. {gap_reason}",
+                        "risk": "medium",
+                    })
 
     # Dedupe, sort, cap insane profits
     seen = set()
@@ -813,6 +933,18 @@ def save_current_data(all_rows):
 
 
 def compute_alerts(all_rows, prev_data):
+    """Compare current data to previous snapshot and generate alerts.
+
+    Key fixes:
+    - corner_risk: old code fired on ANY 10→≤3 drop. Real cornering is rare.
+      Now requires: price ALSO increased (organic sales = no price spike),
+      AND confidence ≥40 (don't alert on phantom data),
+      AND item ≥1 div (cornering cheap items is pointless).
+    - Low-confidence items (conf < 40) skip most alerts — stale/thin data
+      produces too many false spikes/crashes.
+    - New: 'accelerating' alert when listings fall fast AND price rising
+      (genuine supply squeeze vs. just organic sales).
+    """
     if not prev_data or "items" not in prev_data:
         for r in all_rows:
             r["alert"] = ""; r["price_change"] = 0; r["listings_change"] = 0
@@ -837,27 +969,41 @@ def compute_alerts(all_rows, prev_data):
         pct = round(((r["chaos"] - old_c) / old_c) * 100, 1) if old_c > 0 else (100 if r["chaos"] > 0 else 0)
         lc = r["listings"] - old_l
         r["price_change"] = pct; r["listings_change"] = lc
+        conf = r.get("confidence", 95)
 
-        # Underpriced alert: only when price DROPPED into underpriced territory
-        # (>30% below median AND high demand AND price actually fell)
+        # Underpriced alert: price dropped into underpriced territory
         if r.get("underpriced", 0) > 30 and r.get("demand", 0) > 50 and pct < -5:
             r["alert"] = "underpriced"; alert_count += 1
-        # Meta spike: used by a meta build AND price spiked >15%
-        elif len(r.get("builds", [])) > 0 and pct > 15:
+
+        # Meta spike: meta item AND price spiked significantly
+        elif len(r.get("builds", [])) > 0 and pct > 15 and conf >= 55:
             r["alert"] = "meta_spike"; alert_count += 1
-        # Corner risk: had >10 listings last run, now <=3
-        elif old_l > 10 and r["listings"] <= 3:
+
+        # Corner risk: FIXED — old code fired on any supply drop.
+        # Real cornering: listings dropped AND price spiked AND item is valuable.
+        # Organic sales: listings drop but price stays flat or falls.
+        elif (old_l > 10 and r["listings"] <= 3
+              and pct > 10          # price went UP — if someone bought to relist, price spikes
+              and r["chaos"] >= 100  # worth cornering at all
+              and conf >= 40):       # don't alert on phantom data
             r["alert"] = "corner_risk"; alert_count += 1
+
         elif abs(pct) < 5:
             r["alert"] = ""
-        elif pct >= 25:
+
+        elif pct >= 25 and conf >= 50:
             r["alert"] = "spike"; alert_count += 1
-        elif pct <= -25:
+
+        elif pct <= -25 and conf >= 50:
             r["alert"] = "crash"; alert_count += 1
-        elif lc < -15 and old_l > 20:
+
+        elif lc < -15 and old_l > 20 and pct > 5:
+            # Supply drying AND price rising = genuine squeeze
             r["alert"] = "drying"; alert_count += 1
+
         elif lc > 50:
             r["alert"] = "flood"; alert_count += 1
+
         else:
             r["alert"] = ""
     return alert_count
@@ -971,42 +1117,52 @@ def find_whale_targets(all_rows, div_ratio):
         item_reason = build_reason(r)
         has_meta = len(r.get("builds", [])) > 0
 
-        # ── Supply Cornering ──
+        # —— Supply Cornering: add 30% slippage to cost estimate ——
         if r["listings"] <= 10 and r["chaos"] >= d:
-            cost_to_corner = r["chaos"] * r["listings"]
+            # Real cost is higher than price × listings because:
+            # 1. Some listings are AFK/offline (not actually buyable)
+            # 2. As you buy, remaining sellers see activity and raise prices
+            # Model: assume you can buy 70% of listings at face value,
+            # remaining 30% at +20% (slippage). Effective cost ~1.09x stated.
+            effective_cost = round(r["chaos"] * r["listings"] * 1.15)
             demand_pct = 0.2 + (r["demand"] / 200)
             if has_meta:
                 demand_pct += 0.15
             projected_price = round(r["chaos"] * (1 + demand_pct))
             projected_profit = round((projected_price - r["chaos"]) * r["listings"])
-            if projected_profit > 0 and cost_to_corner < 50000:
+            if projected_profit > 0 and effective_cost < 50000:
                 demand_pts = min(round(r["demand"] * 0.4), 40)
                 meta_pts = min(len(r.get("builds", [])) * 10, 30)
                 scarcity_pts = max(0, round((10 - r["listings"]) * 3))
                 corner_score = min(demand_pts + meta_pts + scarcity_pts, 100)
-                why = f"Buy all {r['listings']} at {r['chaos']}c = {cost_to_corner}c total"
+                why = f"Buy all {r['listings']} at {r['chaos']}c"
+                why += f" = ~{effective_cost}c real cost (includes ~15% slippage/AFK sellers)"
                 why += f". Relist at ~{projected_price}c (+{round(demand_pct*100)}%)"
                 if has_meta:
                     why += f". Builds ({', '.join(r['builds'])}) guarantee buyers"
                 if r["listings"] <= 3:
                     why += ". Almost no supply — easy to control"
                 strategies.append({"id": "corner", "profit": projected_profit,
-                    "detail": why, "cost": cost_to_corner})
+                    "detail": why, "cost": effective_cost})
 
-        # ── 6-Link Flipping ──
+        # —— 6-Link Flipping: use real 6L price from lookup ——
         if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["links"] < 6 and r["chaos"] >= 100:
             link_cost = CRAFT_COSTS_CHAOS.get("6-link", 370)
             tainted_cost = CRAFT_COSTS_CHAOS.get("6-link-tainted", 75)
-            sell_est = round(r["chaos"] * 1.4)
-            # Normal fusings path
+            # Use real 6L market price if available — chaos*1.4 was just a guess
+            real_sixl, real_sixl_listings = lookup_price(r["name"], links=6)
+            if real_sixl and real_sixl_listings >= 1:
+                sell_est = real_sixl
+                price_note = f"Real 6L price: {sell_est}c ({real_sixl_listings} listed)"
+            else:
+                sell_est = round(r["chaos"] * 1.4)
+                price_note = f"No 6L data — estimated at {sell_est}c (1.4x unlinked)"
             profit_normal = sell_est - r["chaos"] - link_cost
-            # Tainted fusings path (corrupt first, then tainted fuse — much cheaper)
             profit_tainted = sell_est - r["chaos"] - tainted_cost
             if profit_normal > 50 or profit_tainted > 50:
-                detail = f"Buy {r['links'] or 0}L at {r['chaos']}c"
+                detail = f"Buy {r['links'] or 0}L at {r['chaos']}c. {price_note}"
                 detail += f". Option A: Regular fusings (~{link_cost}c, profit {profit_normal}c)"
-                detail += f". Option B: Corrupt first → tainted fusings (~{tainted_cost}c, profit {profit_tainted}c — much cheaper but item is corrupted)"
-                detail += f". Sell 6L for ~{sell_est}c"
+                detail += f". Option B: Corrupt first → tainted fusings (~{tainted_cost}c, profit {profit_tainted}c — corrupted item)"
                 if has_meta:
                     detail += f". Needed by {', '.join(r['builds'])}"
                 best_profit = max(profit_normal, profit_tainted)
@@ -1014,7 +1170,7 @@ def find_whale_targets(all_rows, div_ratio):
                 strategies.append({"id": "6link_flip", "profit": best_profit,
                     "detail": detail, "cost": best_cost})
 
-        # ── Awakened Gem Leveling ──
+        # —— Awakened Gem Leveling ——
         if r["type"] == "SkillGem" and "awakened" in r["name"].lower():
             if r.get("gem_level") and str(r["gem_level"]) in ("4", "3"):
                 lv = int(r["gem_level"])
@@ -1026,21 +1182,24 @@ def find_whale_targets(all_rows, div_ratio):
                 strategies.append({"id": "gem_level", "profit": profit,
                     "detail": detail, "cost": r["chaos"]})
 
-        # ── Double Corrupt (Glimpse of Chaos) ──
+        # —— Double Corrupt (Glimpse of Chaos): corrected EV ——
         if r["type"] in ("UniqueArmour", "UniqueWeapon") and r["chaos"] >= d * 2:
             dc_cost = CRAFT_COSTS_CHAOS.get("double_corrupt", 500)
             outcomes = get_corrupt_info(r["type"], r["name"])
-            # Conservative EV: 15% GG (2x), 25% decent (1x), 35% bad (0.5x), 25% brick (0)
-            ev = r["chaos"] * (0.15 * 2.0 + 0.25 * 1.0 + 0.35 * 0.5 + 0.25 * 0)
-            profit = round(ev - dc_cost)
+            # Total position at risk = item + altar cost
+            total_at_risk = r["chaos"] + dc_cost
+            # EV: outcomes applied to the item's current value
+            # 15% GG (2.5x value), 25% one good implicit (1.5x), 35% bad (0.6x), 25% brick (0)
+            ev = r["chaos"] * (0.15 * 2.5 + 0.25 * 1.5 + 0.35 * 0.6 + 0.25 * 0)
+            profit = round(ev - total_at_risk)
             if profit > 50:
-                detail = f"Use Glimpse of Chaos on {r['name']} ({r['chaos']}c + {dc_cost}c altar cost)"
+                detail = f"Glimpse of Chaos on {r['name']} ({r['chaos']}c item + {dc_cost}c altar = {total_at_risk}c total risk)"
                 detail += f". Target implicits: {', '.join(outcomes[:3])}"
-                detail += f". ~25% chance of bricking (poof), ~15% chance of GG double implicit"
+                detail += f". EV: {round(ev)}c. ~25% brick (item gone), ~15% GG double implicit (~{round(r['chaos']*2.5)}c)"
                 strategies.append({"id": "double_corrupt", "profit": profit,
-                    "detail": detail, "cost": r["chaos"] + dc_cost})
+                    "detail": detail, "cost": total_at_risk})
 
-        # ── Vaal Corruption ──
+        # —— Vaal Corruption ——
         if r["type"] in ("UniqueArmour", "UniqueWeapon", "UniqueAccessory") and r["chaos"] >= 100 and r["chaos"] < d * 5:
             outcomes = get_corrupt_info(r["type"], r["name"])
             corrupt_cost = CRAFT_COSTS_CHAOS.get("corrupt", 25)
@@ -1054,7 +1213,7 @@ def find_whale_targets(all_rows, div_ratio):
                 strategies.append({"id": "vaal_corrupt", "profit": profit,
                     "detail": detail, "cost": r["chaos"] + corrupt_cost})
 
-        # ── Tainted Chaos on Jewels ──
+        # —— Tainted Chaos on Jewels ——
         if r["type"] == "UniqueJewel" and r["chaos"] >= 50:
             outcomes = get_corrupt_info(r["type"], r["name"])
             profit = round(r["chaos"] * 1.2)
@@ -1064,7 +1223,7 @@ def find_whale_targets(all_rows, div_ratio):
             strategies.append({"id": "tainted_chaos_jewels", "profit": profit,
                 "detail": detail, "cost": r["chaos"] + 50})
 
-        # ── Harvest Fracture ──
+        # —— Harvest Fracture ——
         if r["type"] == "BaseType" and r["chaos"] >= d * 2:
             frac_cost = CRAFT_COSTS_CHAOS.get("fracture", 750)
             profit = round(r["chaos"] * 0.8)
@@ -1075,7 +1234,7 @@ def find_whale_targets(all_rows, div_ratio):
                 strategies.append({"id": "harvest_fracture", "profit": profit,
                     "detail": detail, "cost": r["chaos"] + frac_cost})
 
-        # ── Essence Crafting ──
+        # —— Essence Crafting ——
         if r["type"] == "BaseType" and r["chaos"] >= 100:
             ess_cost = CRAFT_COSTS_CHAOS.get("essence", 125)
             profit = round(r["chaos"] * 0.5)
@@ -1134,12 +1293,9 @@ header h1{font-size:18px;font-weight:600;color:var(--accent);display:inline}
 header .meta{font-size:12px;color:var(--muted)}
 .ratio-badge{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;color:var(--accent);font-weight:600;margin-left:8px}
 .header-left{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-
-/* Simple/Pro toggle */
 .pro-toggle{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:20px;overflow:hidden;height:32px}
 .pro-toggle-btn{padding:0 16px;font-size:12px;font-weight:600;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .2s;line-height:30px;white-space:nowrap}
 .pro-toggle-btn.active{background:var(--accent);color:var(--bg);border-radius:20px}
-
 .mode-tabs{display:flex;gap:0;padding:0;border-bottom:2px solid var(--border);flex-wrap:wrap}
 .mode-tab{padding:10px 14px;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s;white-space:nowrap;position:relative}
 .mode-tab:hover{color:var(--text)}.mode-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
@@ -1182,7 +1338,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .alert-underpriced{background:#1a3d1a;color:#4CAF82;border:1px solid #2d6b2d}
 .alert-meta_spike{background:#3d2a08;color:#e09d2a;border:1px solid #6b4a12}
 .alert-corner_risk{background:#3d1a2a;color:#e055aa;border:1px solid #6b2d4a}
-/* Refresh modal */
 .refresh-modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center}
 .refresh-modal-overlay.show{display:flex}
 .refresh-modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem 2rem;max-width:440px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
@@ -1193,7 +1348,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .refresh-modal button:hover{opacity:.85}
 .refresh-btn{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
 .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
-/* Hint box */
 .hint-bar{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:box-shadow .2s}
 .hint-toggle{padding:8px 14px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);transition:background .1s;user-select:none}
 .hint-toggle:hover{background:var(--surface2);color:var(--text)}
@@ -1201,7 +1355,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .hint-body.open{display:block}
 .hint-body ul{padding-left:18px;margin:4px 0}
 .hint-body li{margin-bottom:3px}
-/* History section */
 .history-section{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-top:16px}
 .history-section h3{font-size:13px;color:var(--accent);margin-bottom:8px}
 .history-item{font-size:12px;color:var(--muted);padding:3px 0;border-bottom:1px solid var(--border)}
@@ -1292,16 +1445,12 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .tier-legend{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:1rem;padding:.75rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px}
 .tier-legend-item{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
 .tier-dot{width:10px;height:10px;border-radius:50%}
-
-/* Currency tab */
 .currency-highlight{background:#1a3d28 !important;border-color:#2d6b45 !important}
 .arb-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem 1.2rem;margin-bottom:10px;transition:box-shadow .2s}
 .arb-card:hover{box-shadow:0 4px 16px rgba(0,0,0,0.3)}
 .arb-path{font-size:14px;font-weight:600;color:var(--accent)}
 .arb-profit{font-size:16px;font-weight:700;color:var(--green)}
 .arb-detail{font-size:12px;color:var(--muted);margin-top:4px}
-
-/* Zero to Mirror */
 .z2m-phase{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.2rem;margin-bottom:14px;transition:box-shadow .2s}
 .z2m-phase:hover{box-shadow:0 4px 16px rgba(0,0,0,0.3)}
 .z2m-phase.active-phase{border-color:var(--accent);box-shadow:0 0 12px rgba(200,155,60,0.15)}
@@ -1319,8 +1468,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .z2m-overall-progress{margin-bottom:1.5rem;padding:1.2rem;background:var(--surface);border:2px solid var(--accent);border-radius:10px}
 .z2m-overall-label{font-size:13px;color:var(--muted);margin-bottom:4px}
 .z2m-overall-val{font-size:28px;font-weight:700;color:var(--accent)}
-
-/* Guide */
 .guide-wrap{max-width:900px}
 .guide-section{background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden;transition:box-shadow .2s}
 .guide-section:hover{box-shadow:0 4px 16px rgba(0,0,0,0.3)}
@@ -1335,11 +1482,9 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .guide-body code{background:var(--surface2);color:var(--accent);padding:1px 6px;border-radius:4px;font-size:12px}
 .guide-summary{padding:14px 16px;font-size:13px;color:var(--text);line-height:1.5}
 .guide-color{width:12px;height:12px;border-radius:3px;display:inline-block;vertical-align:middle;margin-right:4px}
-
 @media(max-width:900px){.page-wrapper{padding:0 1rem}.suggest-grid,.flip-grid{grid-template-columns:1fr}.stats-grid{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}}
 @media(max-width:600px){.page-wrapper{padding:0 .5rem}.mode-tab{padding:8px 8px;font-size:11px}.stats-grid{grid-template-columns:repeat(2,1fr)}.flip-flow{flex-direction:column;align-items:stretch}.flip-flow .flip-arrow{text-align:center}.controls{flex-direction:column;align-items:stretch}.control-group{width:100%}}
 </style></head><body>
-
 <div class="page-wrapper">
 <header>
   <div class="header-left">
@@ -1359,7 +1504,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
     <button onclick="document.getElementById('refreshModal').classList.remove('show')">Got it</button>
   </div>
 </div>
-
 <div class="mode-tabs" id="modeTabs">
   <div class="mode-tab active" onclick="switchMode('economy')">Economy</div>
   <div class="mode-tab" onclick="switchMode('craft')">Craft Finder</div>
@@ -1373,7 +1517,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
   <div class="mode-tab" onclick="switchMode('guide')" style="margin-left:auto;color:var(--blue)">Tools &amp; Resources</div>
 </div>
 <div class="tabs" id="tabs"></div>
-
 <div class="main">
   <div class="controls" id="economyControls">
     <div class="control-group"><label>Min chaos</label><input type="number" id="minChaos" value="50" min="0" step="10" oninput="render()"></div>
@@ -1408,7 +1551,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
     <div class="control-group"><input type="text" id="alertSearch" placeholder="Search..." oninput="render()"></div>
   </div>
   <div id="budgetControls" style="display:none"></div>
-  <!-- Whale controls -->
   <div class="controls" id="whaleControls" style="display:none">
     <div class="control-group"><label>Strategy</label><select id="whaleStrategy" onchange="render()"><option value="all">All Strategies</option><option value="corner">Supply Cornering</option><option value="6link_flip">6-Link Flipping</option><option value="gem_level">Gem Leveling</option><option value="double_corrupt">Double Corrupt</option><option value="vaal_corrupt">Vaal Corrupt</option><option value="tainted_chaos_jewels">Tainted Chaos Jewels</option><option value="harvest_fracture">Harvest Fracture</option><option value="essence_craft">Essence Craft</option></select></div>
     <div class="control-group"><label>Category</label><select id="whaleTag" onchange="render()"><option value="all">All</option><option value="flipping">Flipping</option><option value="corruption">Corruption</option><option value="crafting">Crafting</option><option value="leveling">Leveling</option><option value="advanced">Advanced</option></select></div>
@@ -1422,7 +1564,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
     <div class="control-group"><input type="text" id="currSearch" placeholder="Search currency..." oninput="render()"></div>
   </div>
   <div id="z2mControls" style="display:none"></div>
-
   <div class="tier-legend" id="tierLegend" style="display:none">
     <div class="tier-legend-item"><div class="tier-dot" style="background:#888"></div>&lt;1d</div>
     <div class="tier-legend-item"><div class="tier-dot" style="background:#5b9bd5"></div>1-3d</div>
@@ -1431,7 +1572,6 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
     <div class="tier-legend-item"><div class="tier-dot" style="background:#e08833"></div>11-15d</div>
     <div class="tier-legend-item"><div class="tier-dot" style="background:#e05555"></div>15+d</div>
   </div>
-
   <div class="hint-bar" id="hintBox" style="display:none"><div class="hint-toggle" onclick="this.nextElementSibling.classList.toggle('open')">&#128161; How to use this tab</div><div class="hint-body" id="hintBody"></div></div>
   <div class="stats-grid" id="stats"></div>
   <div id="contentArea">
@@ -1447,41 +1587,16 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
   <div class="footer" id="footerText"></div>
 </div>
 </div>
-
 <script>
 const SERVE_MODE=SERVE_MODE_FLAG;
-function doRefresh(){
-  if(SERVE_MODE){
-    const btn=document.getElementById('refreshBtn');
-    btn.textContent='Refreshing...';btn.style.color='var(--accent)';btn.disabled=true;
-    fetch('/refresh').then(r=>{if(r.ok){btn.textContent='Done! Reloading...';setTimeout(()=>location.reload(),500);}else{btn.textContent='Error — retry';btn.disabled=false;}}).catch(()=>{btn.textContent='Error — retry';btn.disabled=false;btn.style.color='var(--red)';});
-  } else {
-    document.getElementById('refreshModal').classList.add('show');
-  }
-}
-const DATA=ALL_DATA_JSON, FLIPS=ALL_FLIPS_JSON, DIV_RATIO=DIV_RATIO_NUM, LEAGUE='LEAGUE_NAME';
-const CURRENCIES=ALL_CURRENCY_JSON;
-const ARB_LOOPS=ALL_ARB_JSON;
-const WHALES=ALL_WHALE_JSON;
-const WHALE_STRATS=ALL_STRATS_JSON;
-const MIRROR_PRICE=MIRROR_PRICE_NUM;
-const HISTORY=ALL_HISTORY_JSON;
-let mode='economy';
-let proMode=false;
-const MODES=['economy','craft','suggest','flip','budget','alerts','currency','z2m','whale','guide'];
+function doRefresh(){if(SERVE_MODE){const btn=document.getElementById('refreshBtn');btn.textContent='Refreshing...';btn.style.color='var(--accent)';btn.disabled=true;fetch('/refresh').then(r=>{if(r.ok){btn.textContent='Done! Reloading...';setTimeout(()=>location.reload(),500);}else{btn.textContent='Error — retry';btn.disabled=false;}}).catch(()=>{btn.textContent='Error — retry';btn.disabled=false;btn.style.color='var(--red)';});}else{document.getElementById('refreshModal').classList.add('show');}}
+const DATA=ALL_DATA_JSON,FLIPS=ALL_FLIPS_JSON,DIV_RATIO=DIV_RATIO_NUM,LEAGUE='LEAGUE_NAME';
+const CURRENCIES=ALL_CURRENCY_JSON;const ARB_LOOPS=ALL_ARB_JSON;const WHALES=ALL_WHALE_JSON;const WHALE_STRATS=ALL_STRATS_JSON;const MIRROR_PRICE=MIRROR_PRICE_NUM;const HISTORY=ALL_HISTORY_JSON;
+let mode='economy';let proMode=false;const MODES=['economy','craft','suggest','flip','budget','alerts','currency','z2m','whale','guide'];
 const TL={UniqueArmour:'Armours',UniqueWeapon:'Weapons',UniqueJewel:'Jewels',UniqueAccessory:'Accessories',UniqueFlask:'Flasks',SkillGem:'Gems',BaseType:'Bases'};
 const ML={'6-link':'6-Link','corrupt':'Corrupt','double_corrupt':'Dbl Corrupt','harvest':'Harvest','fracture':'Fracture','essence':'Essence'};
-const TYPES=[...new Set(DATA.map(d=>d.type))];
-let activeType=TYPES[0],sortKey='chaos',sortDir=-1;
-
-function setProMode(v){
-  proMode=v;
-  const btns=document.querySelectorAll('.pro-toggle-btn');
-  btns[0].classList.toggle('active',!v);
-  btns[1].classList.toggle('active',v);
-  render();
-}
-
+const TYPES=[...new Set(DATA.map(d=>d.type))];let activeType=TYPES[0],sortKey='chaos',sortDir=-1;
+function setProMode(v){proMode=v;const btns=document.querySelectorAll('.pro-toggle-btn');btns[0].classList.toggle('active',!v);btns[1].classList.toggle('active',v);render();}
 function tradeUrl(n,c){return c?`https://poe.ninja/economy/${LEAGUE.toLowerCase()}/${c}?name=${encodeURIComponent(n)}`:`https://poe.ninja/economy/${LEAGUE.toLowerCase()}?name=${encodeURIComponent(n)}`;}
 function tradeUrlOfficial(n){return `https://www.pathofexile.com/trade/search/${LEAGUE}?q={"query":{"term":"${encodeURIComponent(n)}"}}`;}
 function confColor(c){return c<=25?'var(--red)':c<=50?'var(--yellow)':'var(--green)';}
@@ -1491,488 +1606,36 @@ function esc(s){return typeof s!=='string'?s:s.replace(/&/g,'&amp;').replace(/</
 function dc(d){return d>=60?'#e05555':d>=30?'#d4a017':'#5b9bd5';}
 function sc(s){return s>=70?'#4CAF82':s>=40?'#d4a017':'#5b9bd5';}
 function fmt(c){return c>=1000?(c/1000).toFixed(1)+'k':c.toLocaleString();}
-
 function alertBadge(a,p){if(!a)return'';const m={spike:['SPIKE','alert-spike'],crash:['CRASH','alert-crash'],drying:['DRYING','alert-drying'],flood:['FLOOD','alert-flood'],'new':['NEW','alert-new'],underpriced:['UNDERPRICED','alert-underpriced'],meta_spike:['META SPIKE','alert-meta_spike'],corner_risk:['CORNER RISK','alert-corner_risk']};const v=m[a];return v?`<span class="badge-alert ${v[1]}">${v[0]}</span>`:'';}
-
-const HINTS={
-  economy:'<ul><li>Sort by Demand to find hot items.</li><li>Use "Underpriced" filter to find buy-low opportunities.</li><li>Click Trade to open official trade site, or ninja for poe.ninja.</li><li>⚠ on price = unreliable (very few listings). ~ on listings = approximate poe.ninja count.</li></ul>',
-  craft:'<ul><li>Set "Min profit" to filter noise.</li><li>Use "Meta only" for guaranteed demand.</li><li>Higher risk = higher variance, not guaranteed profit.</li></ul>',
-  suggest:'<ul><li>Gold #1 = highest expected profit.</li><li>Compare risk levels before committing.</li><li>Underpriced + high demand = best targets.</li></ul>',
-  flip:'<ul><li>6-Link spreads are safest.</li><li>Check listing counts — more listings = easier to execute.</li><li>Start with small flips.</li></ul>',
-  budget:'<ul><li>Enter your total available chaos.</li><li>The plan optimizes for best ROI.</li><li>Meta-only mode ensures items actually sell.</li></ul>',
-  whale:'<ul><li>Filter "Cornerable only" + sort by corner score.</li><li>Items with meta build badges have guaranteed demand.</li><li>Start small — corner 1-2 items first.</li><li>⚠ = unreliable price. Always verify on the official trade site before buying.</li></ul>',
-  currency:'<ul><li>Only shows currencies with real exchange pairs (3+ listings both sides).</li><li>Spread &gt;3% = profitable to flip.</li><li>Volume matters — more listings = sustainable.</li></ul>',
-  z2m:'<ul><li>Uncheck strategies you don\'t want to use.</li><li>Phase 1 items are your starting point.</li><li>Each phase builds on the previous.</li></ul>',
-  alerts:'<ul><li>Run the script twice (morning + evening) for meaningful alerts.</li><li>UNDERPRICED alerts are your best buy signals.</li><li>CORNER RISK means someone may be manipulating supply.</li></ul>',
-  guide:''
-};
-function toggleHint(m){
-  const box=document.getElementById('hintBox');
-  const body=document.getElementById('hintBody');
-  if(!HINTS[m]){box.style.display='none';return;}
-  box.style.display='block';
-  body.innerHTML=HINTS[m];
-  body.classList.remove('open');
-}
-
-function fmtCell(f,val,row){
-  switch(f){
-    case 'name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable — very few listings">⚠ price</span>');if(row.score>=60)p.push('<span class="badge badge-hot">HOT</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%under</span>`);if(row.alert)p.push(alertBadge(row.alert,row.price_change));}return `<div class="name-cell">${p.join('')}</div>`;}
-    case 'craft_name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable">⚠</span>');if(row.builds&&row.builds.length)row.builds.forEach(b=>p.push(`<span class="badge badge-build">${esc(b)}</span>`));if(row.links>=6)p.push('<span class="badge badge-6l">6L</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%</span>`);}return `<div class="name-cell">${p.join('')}</div>`;}
-    case 'type_label':return TL[val]||val||'-';
-    case 'tier':return `<span class="tier-badge" style="color:${row.tier_color};border-color:${row.tier_color}30;background:${row.tier_color}18">${esc(val)}</span>`;
-    case 'links':return val>=6?'<span class="badge badge-6l">6L</span>':val>0?val+'L':'-';
-    case 'chaos':{const cf=row.confidence||95;const warn=cf<=25?` <span class="conf-low" title="${confLabel(cf)} price (${cf}/100) — only ${row.listings} on poe.ninja">⚠</span>`:cf<=50?` <span class="conf-mid" title="${confLabel(cf)} (${cf}/100)">~</span>`:'';return `<span class="chaos-val">${fmt(val)}c</span>${warn}`;}
-    case 'listings':{const c=val<=5?'listings-low':val<=20?'listings-mid':'listings-ok';const tip=val<=3?' title="poe.ninja count — check trade site for actual listings"':'';return `<span class="${c}"${tip}>~${val}</span>`;}
-    case 'demand':{const c=dc(val);const cl=val>=60?'demand-high':val>=30?'demand-mid':'demand-low';return `<div class="demand-wrap"><div class="demand-bar"><div class="demand-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="${cl}" style="font-size:11px">${val}</span></div>`;}
-    case 'score':{const c=sc(val);return `<div class="score-wrap"><div class="score-bar"><div class="score-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="score-num">${val}</span></div>`;}
-    case 'spark':return sparkSvg(val);
-    case 'trade':return `<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(row.name)}" target="_blank" rel="noopener">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(row.name,row.trade_cat)}" target="_blank" rel="noopener">ninja</a></div>`;
-    case 'method':return val?`<span class="craft-method-badge method-${val}">${ML[val]||val}</span>`:'-';
-    case 'craft_action':return val?`<span class="craft-action">${esc(val)}</span>`:'-';
-    case 'craft_reason':return val?`<span class="craft-reason">${esc(val)}</span>`:'-';
-    case 'profit':{if(!val||val<=0)return'-';return `<span class="${val>=500?'profit-high':'profit-positive'}">${fmt(val)}c</span>`;}
-    case 'price_change':return val?`<span class="${val>0?'price-up':'price-down'}">${val>0?'+':''}${val}%</span>`:'-';
-    case 'pct':return val?val+'%':'-';
-    default:return val||'-';
-  }
-}
-
-/* Column definitions */
-const COLS_PRO={
-  default:[{key:'name',label:'Item',fmt:'name'},{key:'links',label:'Links',fmt:'links'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}],
-  SkillGem:[{key:'name',label:'Gem',fmt:'name'},{key:'gem_level',label:'Lv',fmt:'plain'},{key:'gem_quality',label:'Q',fmt:'pct'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}],
-  BaseType:[{key:'name',label:'Base',fmt:'name'},{key:'level_req',label:'Lvl',fmt:'plain'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}],
-};
-const COLS_SIMPLE={
-  default:[{key:'name',label:'Item',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}],
-  SkillGem:[{key:'name',label:'Gem',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}],
-  BaseType:[{key:'name',label:'Base',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}],
-};
+const HINTS={economy:'<ul><li>Sort by Demand to find hot items.</li><li>Use "Underpriced" filter to find buy-low opportunities.</li><li>Click Trade to open official trade site, or ninja for poe.ninja.</li><li>Warning on price = unreliable (very few listings). ~ on listings = approximate poe.ninja count.</li></ul>',craft:'<ul><li>Set "Min profit" to filter noise.</li><li>Use "Meta only" for guaranteed demand.</li><li>Higher risk = higher variance, not guaranteed profit.</li></ul>',suggest:'<ul><li>Gold #1 = highest expected profit.</li><li>Compare risk levels before committing.</li><li>Underpriced + high demand = best targets.</li></ul>',flip:'<ul><li>6-Link spreads are safest.</li><li>Check listing counts — more listings = easier to execute.</li><li>Start with small flips.</li></ul>',budget:'<ul><li>Enter your total available chaos.</li><li>The plan optimizes for best ROI.</li><li>Meta-only mode ensures items actually sell.</li></ul>',whale:'<ul><li>Filter "Cornerable only" + sort by corner score.</li><li>Items with meta build badges have guaranteed demand.</li><li>Start small — corner 1-2 items first.</li><li>Warning = unreliable price. Always verify on the official trade site before buying.</li></ul>',currency:'<ul><li>Only shows currencies with real exchange pairs (3+ listings both sides).</li><li>Spread &gt;3% = profitable to flip.</li><li>Volume matters — more listings = sustainable.</li></ul>',z2m:'<ul><li>Uncheck strategies you don\'t want to use.</li><li>Phase 1 items are your starting point.</li><li>Each phase builds on the previous.</li></ul>',alerts:'<ul><li>Run the script twice (morning + evening) for meaningful alerts.</li><li>UNDERPRICED alerts are your best buy signals.</li><li>CORNER RISK means someone may be manipulating supply.</li></ul>',guide:''};
+function toggleHint(m){const box=document.getElementById('hintBox');const body=document.getElementById('hintBody');if(!HINTS[m]){box.style.display='none';return;}box.style.display='block';body.innerHTML=HINTS[m];body.classList.remove('open');}
+function fmtCell(f,val,row){switch(f){case 'name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable — very few listings">⚠ price</span>');if(row.score>=60)p.push('<span class="badge badge-hot">HOT</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%under</span>`);if(row.alert)p.push(alertBadge(row.alert,row.price_change));}return `<div class="name-cell">${p.join('')}</div>`;} case 'craft_name':{const p=[`<span>${esc(val)}</span>`];if(row.variant)p.push(`<span style="font-size:10px;color:var(--muted);margin-left:4px">(${esc(row.variant)})</span>`);if(proMode){if(row.confidence<=25)p.push('<span class="conf-low" title="Price unreliable">⚠</span>');if(row.builds&&row.builds.length)row.builds.forEach(b=>p.push(`<span class="badge badge-build">${esc(b)}</span>`));if(row.links>=6)p.push('<span class="badge badge-6l">6L</span>');if(row.underpriced>0)p.push(`<span class="badge badge-underpriced">${row.underpriced}%</span>`);}return `<div class="name-cell">${p.join('')}</div>`;} case 'type_label':return TL[val]||val||'-';case 'tier':return `<span class="tier-badge" style="color:${row.tier_color};border-color:${row.tier_color}30;background:${row.tier_color}18">${esc(val)}</span>`;case 'links':return val>=6?'<span class="badge badge-6l">6L</span>':val>0?val+'L':'-';case 'chaos':{const cf=row.confidence||95;const warn=cf<=25?` <span class="conf-low" title="${confLabel(cf)} price (${cf}/100) — only ${row.listings} on poe.ninja">⚠</span>`:cf<=50?` <span class="conf-mid" title="${confLabel(cf)} (${cf}/100)">~</span>`:'';return `<span class="chaos-val">${fmt(val)}c</span>${warn}`;} case 'listings':{const c=val<=5?'listings-low':val<=20?'listings-mid':'listings-ok';const tip=val<=3?' title="poe.ninja count — check trade site for actual listings"':'';return `<span class="${c}"${tip}>~${val}</span>`;} case 'demand':{const c=dc(val);const cl=val>=60?'demand-high':val>=30?'demand-mid':'demand-low';return `<div class="demand-wrap"><div class="demand-bar"><div class="demand-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="${cl}" style="font-size:11px">${val}</span></div>`;} case 'score':{const c=sc(val);return `<div class="score-wrap"><div class="score-bar"><div class="score-fill" style="width:${Math.min(val,100)}%;background:${c}"></div></div><span class="score-num">${val}</span></div>`;} case 'spark':return sparkSvg(val);case 'trade':return `<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(row.name)}" target="_blank" rel="noopener">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(row.name,row.trade_cat)}" target="_blank" rel="noopener">ninja</a></div>`;case 'method':return val?`<span class="craft-method-badge method-${val}">${ML[val]||val}</span>`:'-';case 'craft_action':return val?`<span class="craft-action">${esc(val)}</span>`:'-';case 'craft_reason':return val?`<span class="craft-reason">${esc(val)}</span>`:'-';case 'profit':{if(!val||val<=0)return'-';return `<span class="${val>=500?'profit-high':'profit-positive'}">${fmt(val)}c</span>`;} case 'price_change':return val?`<span class="${val>0?'price-up':'price-down'}">${val>0?'+':''}${val}%</span>`:'-';case 'pct':return val?val+'%':'-';default:return val||'-';}}
+const COLS_PRO={default:[{key:'name',label:'Item',fmt:'name'},{key:'links',label:'Links',fmt:'links'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}],SkillGem:[{key:'name',label:'Gem',fmt:'name'},{key:'gem_level',label:'Lv',fmt:'plain'},{key:'gem_quality',label:'Q',fmt:'pct'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}],BaseType:[{key:'name',label:'Base',fmt:'name'},{key:'level_req',label:'Lvl',fmt:'plain'},{key:'spark',label:'7d',fmt:'spark'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'demand',label:'Demand',fmt:'demand'},{key:'score',label:'Opp',fmt:'score'},{key:'_t',label:'',fmt:'trade'}]};
+const COLS_SIMPLE={default:[{key:'name',label:'Item',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}],SkillGem:[{key:'name',label:'Gem',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}],BaseType:[{key:'name',label:'Base',fmt:'name'},{key:'chaos',label:'Price',fmt:'chaos'},{key:'listings',label:'List',fmt:'listings'},{key:'_t',label:'',fmt:'trade'}]};
 const CC_PRO=[{key:'name',fmt:'craft_name',label:'Item'},{key:'type',fmt:'type_label',label:'Type'},{key:'tier_label',fmt:'tier',label:'Tier'},{key:'chaos',fmt:'chaos',label:'Price'},{key:'listings',fmt:'listings',label:'List'},{key:'demand',fmt:'demand',label:'Dem'},{key:'craft_method',fmt:'method',label:'Method'},{key:'craft_action',fmt:'craft_action',label:'Action'},{key:'craft_reason',fmt:'craft_reason',label:'Why'},{key:'craft_profit',fmt:'profit',label:'Profit'},{key:'_t',fmt:'trade',label:''}];
 const CC_SIMPLE=[{key:'name',fmt:'craft_name',label:'Item'},{key:'chaos',fmt:'chaos',label:'Price'},{key:'craft_method',fmt:'method',label:'Method'},{key:'craft_action',fmt:'craft_action',label:'Action'},{key:'craft_profit',fmt:'profit',label:'Profit'},{key:'_t',fmt:'trade',label:''}];
 const AC=[{key:'name',fmt:'name',label:'Item'},{key:'type',fmt:'type_label',label:'Type'},{key:'spark',fmt:'spark',label:'7d'},{key:'chaos',fmt:'chaos',label:'Price'},{key:'price_change',fmt:'price_change',label:'Change'},{key:'listings',fmt:'listings',label:'List'},{key:'listings_change',fmt:'plain',label:'\u0394'},{key:'demand',fmt:'demand',label:'Dem'},{key:'_t',fmt:'trade',label:''}];
-
-function getCols(){return proMode?COLS_PRO:COLS_SIMPLE;}
-function getCC(){return proMode?CC_PRO:CC_SIMPLE;}
-
-function switchMode(m){
-  mode=m;sortKey=m==='flip'?'profit':m==='alerts'?'price_change':m==='craft'?'craft_profit':'chaos';sortDir=-1;
-  document.querySelectorAll('.mode-tab').forEach((el,i)=>el.classList.toggle('active',MODES[i]===m));
-  toggleHint(m);
-  document.getElementById('footerText').innerHTML='';
-  ['economyControls','craftControls','suggestControls','flipControls','alertControls','budgetControls','currencyControls','z2mControls','whaleControls'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
-  const cm={economy:'economyControls',craft:'craftControls',suggest:'suggestControls',flip:'flipControls',alerts:'alertControls',budget:'budgetControls',currency:'currencyControls',z2m:'z2mControls',whale:'whaleControls'};
-  if(cm[m]){const el=document.getElementById(cm[m]);if(el)el.style.display=['budget','z2m'].includes(m)?'block':'flex';}
-  document.getElementById('tierLegend').style.display=['craft','suggest','flip'].includes(m)?'flex':'none';
-  document.getElementById('tabs').style.display=m==='economy'?'flex':'none';
-  document.getElementById('tableWrap').style.display=['economy','craft','alerts','currency'].includes(m)?'':'none';
-  document.getElementById('suggestGrid').style.display=m==='suggest'?'grid':'none';
-  document.getElementById('flipGrid').style.display=m==='flip'?'grid':'none';
-  document.getElementById('whaleGrid').style.display=m==='whale'?'grid':'none';
-  document.getElementById('budgetArea').style.display=m==='budget'?'block':'none';
-  document.getElementById('currencyArea').style.display=m==='currency'?'block':'none';
-  document.getElementById('z2mArea').style.display=m==='z2m'?'block':'none';
-  document.getElementById('guideArea').style.display=m==='guide'?'block':'none';
-  render();
-}
+function getCols(){return proMode?COLS_PRO:COLS_SIMPLE;}function getCC(){return proMode?CC_PRO:CC_SIMPLE;}
+function switchMode(m){mode=m;sortKey=m==='flip'?'profit':m==='alerts'?'price_change':m==='craft'?'craft_profit':'chaos';sortDir=-1;document.querySelectorAll('.mode-tab').forEach((el,i)=>el.classList.toggle('active',MODES[i]===m));toggleHint(m);document.getElementById('footerText').innerHTML='';['economyControls','craftControls','suggestControls','flipControls','alertControls','budgetControls','currencyControls','z2mControls','whaleControls'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});const cm={economy:'economyControls',craft:'craftControls',suggest:'suggestControls',flip:'flipControls',alerts:'alertControls',budget:'budgetControls',currency:'currencyControls',z2m:'z2mControls',whale:'whaleControls'};if(cm[m]){const el=document.getElementById(cm[m]);if(el)el.style.display=['budget','z2m'].includes(m)?'block':'flex';}document.getElementById('tierLegend').style.display=['craft','suggest','flip'].includes(m)?'flex':'none';document.getElementById('tabs').style.display=m==='economy'?'flex':'none';document.getElementById('tableWrap').style.display=['economy','craft','alerts','currency'].includes(m)?'':'none';document.getElementById('suggestGrid').style.display=m==='suggest'?'grid':'none';document.getElementById('flipGrid').style.display=m==='flip'?'grid':'none';document.getElementById('whaleGrid').style.display=m==='whale'?'grid':'none';document.getElementById('budgetArea').style.display=m==='budget'?'block':'none';document.getElementById('currencyArea').style.display=m==='currency'?'block':'none';document.getElementById('z2mArea').style.display=m==='z2m'?'block':'none';document.getElementById('guideArea').style.display=m==='guide'?'block':'none';render();}
 function buildTabs(){document.getElementById('tabs').innerHTML=TYPES.map(t=>`<div class="tab${t===activeType?' active':''}" onclick="switchType('${t}')">${TL[t]||t}</div>`).join('');}
 function switchType(t){activeType=t;buildTabs();render();}
 function render(){({economy:renderEconomy,craft:renderCraft,suggest:renderSuggest,flip:renderFlip,budget:renderBudget,alerts:renderAlerts,currency:renderCurrency,z2m:renderZ2M,whale:renderWhale,guide:renderGuide})[mode]();}
-
-function renderEconomy(){
-  buildTabs();
-  const mc=parseFloat(document.getElementById('minChaos').value)||0,ml=parseInt(document.getElementById('maxListings').value)||99999,sl=document.getElementById('sixLink').checked,ho=document.getElementById('hotOnly').checked,up=document.getElementById('underpricedOnly').checked,q=document.getElementById('search').value.toLowerCase();
-  let items=DATA.filter(d=>d.type===activeType).filter(d=>{if(d.chaos<mc)return false;if(d.listings>ml)return false;if(sl&&d.links<6)return false;if(ho&&d.score<60)return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
-  items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*av.localeCompare(bv);return sortDir*((bv||0)-(av||0));});
-  const all=DATA.filter(d=>d.type===activeType);
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total</div><div class="stat-val">${all.length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${all.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Hot (60+)</div><div class="stat-val">${all.filter(d=>d.score>=60).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-  const cols=getCols();
-  renderTable(cols[activeType]||cols.default,items);
-}
-function renderCraft(){
-  const mf=document.getElementById('craftMethod').value,tf=document.getElementById('craftTier').value,mp=parseFloat(document.getElementById('minProfit').value)||0,mo=document.getElementById('metaOnly').checked,q=document.getElementById('craftSearch').value.toLowerCase();
-  let items=DATA.filter(d=>d.craft_method).filter(d=>{if(mf!=='all'&&d.craft_method!==mf)return false;if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.craft_profit<mp)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
-  items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*(av||'').localeCompare(bv||'');return sortDir*((bv||0)-(av||0));});
-  const cr=DATA.filter(d=>d.craft_method);
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Craftable</div><div class="stat-val">${cr.length}</div></div><div class="stat-card"><div class="stat-label">Meta</div><div class="stat-val">${cr.filter(d=>d.builds&&d.builds.length).length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${cr.filter(d=>d.craft_profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-  renderTable(getCC(),items);
-}
-function renderSuggest(){
-  const tf=document.getElementById('suggestTier').value,md=parseInt(document.getElementById('suggestMinDemand').value)||0,mo=document.getElementById('suggestMeta').checked,up=document.getElementById('suggestUnderpriced').checked,q=document.getElementById('suggestSearch').value.toLowerCase();
-  let items=DATA.filter(d=>d.top3&&d.top3.length>0&&d.top3[0].profit>0).filter(d=>{if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.demand<md)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
-  items.sort((a,b)=>(b.top3[0].profit||0)-(a.top3[0].profit||0));
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">2+ options</div><div class="stat-val">${items.filter(d=>d.top3.length>=2).length}</div></div><div class="stat-card"><div class="stat-label">High demand</div><div class="stat-val" style="color:var(--red)">${items.filter(d=>d.demand>=60).length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${items.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-  document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';
-  const g=document.getElementById('suggestGrid');
-  if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No items match</div>';return;}
-  g.innerHTML=items.slice(0,80).map(r=>{
-    const badges=[];
-    if(proMode){
-      if(r.builds&&r.builds.length)r.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));
-      if(r.links>=6)badges.push('<span class="badge badge-6l">6L</span>');
-      if(r.underpriced>0)badges.push(`<span class="badge badge-underpriced">${r.underpriced}%</span>`);
-    }
-    const showOpts=proMode?r.top3:r.top3.slice(0,1);
-    if(!proMode){
-      /* Simple mode: compact card */
-      const o=showOpts[0];
-      return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta">${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options"><div class="suggest-option best"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span></div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div></div></div></div>`;
-    }
-    const opts=showOpts.map((o,i)=>{const profitHtml=o.profit>0?`<span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span>`:`<span style="color:var(--red)">-EV</span>`;return `<div class="suggest-option${i===0?' best':''}"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="suggest-option-num opt-${i+1}">${i+1}</span><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span>${i===0?'<span class="best-label">BEST</span>':''}</div>${profitHtml}</div><div class="suggest-option-reason">${esc(o.reason)}</div><div class="suggest-option-footer"><span class="risk-${o.risk||'low'}">Risk: ${(o.risk||'low').toUpperCase()}</span></div></div>`;}).join('');
-    return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta"><span class="tier-badge" style="color:${r.tier_color};border-color:${r.tier_color}30;background:${r.tier_color}18">${esc(r.tier_label)}</span><span style="font-size:12px;color:var(--muted)">${TL[r.type]||r.type}</span>${sparkSvg(r.spark)}${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options">${opts}</div></div>`;
-  }).join('');
-}
-function renderFlip(){
-  const ft=document.getElementById('flipType').value,mp=parseFloat(document.getElementById('flipMinProfit').value)||0,mo=document.getElementById('flipMetaOnly').checked,q=document.getElementById('flipSearch').value.toLowerCase();
-  let items=FLIPS.filter(f=>{if(ft!=='all'&&f.flip_type!==ft)return false;if(f.profit<mp)return false;if(mo&&(!f.builds||!f.builds.length))return false;if(q&&!f.name.toLowerCase().includes(q))return false;return true;});
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total flips</div><div class="stat-val">${FLIPS.length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${FLIPS.filter(f=>f.profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">6-Link arb</div><div class="stat-val">${FLIPS.filter(f=>f.flip_type==='6-Link Spread').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-  document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';
-  const g=document.getElementById('flipGrid');
-  if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No flips match</div>';return;}
-  const fc={'6-Link Spread':'flip-6link','Gem Level Gap':'flip-gem','Price Gap':'flip-price'};
-  g.innerHTML=items.slice(0,80).map(f=>{
-    if(!proMode){
-      /* Simple mode: name, buy, sell, profit, trade */
-      return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;
-    }
-    const badges=[];if(f.builds&&f.builds.length)f.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));
-    return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;
-  }).join('');
-}
-function renderBudget(){
-  document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';
-  const a=document.getElementById('budgetArea');
-  if(!a.innerHTML)a.innerHTML=`<div class="budget-input-row"><label>My budget:</label><input type="number" id="budgetAmt" value="2000" min="50" step="100" style="font-size:18px;width:120px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcBudget()">Calculate Plan</button><div class="control-group" style="margin-left:12px"><label class="checkbox"><input type="checkbox" id="budgetMeta"> Meta only</label></div></div><div id="budgetResults"></div>`;
-}
-function calcBudget(){
-  const budget=parseFloat(document.getElementById('budgetAmt').value)||2000,mo=document.getElementById('budgetMeta').checked;
-  const cc={'6-link':${0},'corrupt':${0},'double_corrupt':${0},'harvest':${0},'fracture':${0},'essence':${0}};
-  let cands=DATA.filter(d=>d.craft_profit>0&&d.chaos>0&&d.chaos<=budget);
-  if(mo)cands=cands.filter(d=>d.builds&&d.builds.length);
-  cands=cands.map(d=>{const c=cc[d.craft_method]||100;const tc=d.chaos+c;return{...d,total_cost:tc,roi:d.craft_profit/tc};}).filter(d=>d.total_cost<=budget);
-  cands.sort((a,b)=>b.roi-a.roi);
-  let rem=budget,plan=[],tp=0,ts=0;const used=new Set();
-  for(const c of cands){if(rem<c.total_cost)continue;const k=c.name+'|'+c.type;if(used.has(k))continue;used.add(k);rem=Math.round(rem-c.total_cost);tp+=c.craft_profit;ts+=c.total_cost;plan.push(c);if(plan.length>=15)break;}
-  const roi=ts>0?Math.round(tp/ts*100):0;
-  const r=document.getElementById('budgetResults');
-  if(!plan.length){r.innerHTML='<div class="empty">No profitable crafts found. Try increasing budget.</div>';return;}
-  r.innerHTML=`<div class="budget-summary"><div class="budget-summary-item"><div class="budget-summary-label">Budget</div><div class="budget-summary-val">${fmt(budget)}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Spent</div><div class="budget-summary-val">${fmt(Math.round(ts))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Profit</div><div class="budget-summary-val" style="color:var(--green)">+${fmt(Math.round(tp))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">ROI</div><div class="budget-summary-val">${roi}%</div></div><div class="budget-summary-item"><div class="budget-summary-label">Left</div><div class="budget-summary-val" style="color:var(--muted)">${fmt(rem)}c</div></div></div><div class="budget-plan" style="margin-top:14px">${plan.map((p,i)=>{const bg=[];if(p.builds&&p.builds.length)p.builds.forEach(b=>bg.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="budget-item"><div class="budget-item-left"><span class="budget-step">${i+1}</span><span class="budget-item-name">${esc(p.name)}</span><span class="craft-method-badge method-${p.craft_method}">${ML[p.craft_method]||p.craft_method}</span>${bg.join('')}</div><div class="budget-item-right"><span style="font-size:12px;color:var(--muted)">Buy: <span class="chaos-val">${fmt(p.chaos)}c</span></span><span style="font-size:12px;color:var(--muted)">${esc(p.craft_action)}</span><span class="profit-positive">+${fmt(p.craft_profit)}c</span><a class="trade-link" href="${tradeUrlOfficial(p.name)}" target="_blank">Buy &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(p.name,p.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('')}</div>`;
-}
-function renderAlerts(){
-  const af=document.getElementById('alertType').value,q=document.getElementById('alertSearch').value.toLowerCase();
-  let items=DATA.filter(d=>d.alert).filter(d=>{if(af!=='all'&&d.alert!==af)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});
-  items.sort((a,b)=>Math.abs(b.price_change||0)-Math.abs(a.price_change||0));
-  const aa=DATA.filter(d=>d.alert);
-  document.getElementById('alertDot').style.display=aa.length?'inline-block':'none';
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Alerts</div><div class="stat-val" style="color:var(--red)">${aa.length}</div></div><div class="stat-card"><div class="stat-label">Spikes</div><div class="stat-val" style="color:var(--red)">${aa.filter(d=>d.alert==='spike').length}</div></div><div class="stat-card"><div class="stat-label">Crashes</div><div class="stat-val" style="color:var(--blue)">${aa.filter(d=>d.alert==='crash').length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${aa.filter(d=>d.alert==='underpriced').length}</div></div><div class="stat-card"><div class="stat-label">Meta Spike</div><div class="stat-val" style="color:var(--orange)">${aa.filter(d=>d.alert==='meta_spike').length}</div></div><div class="stat-card"><div class="stat-label">Corner Risk</div><div class="stat-val" style="color:var(--purple)">${aa.filter(d=>d.alert==='corner_risk').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-  renderTable(AC,items);
-  /* History section */
-  let histHtml='';
-  if(HISTORY&&HISTORY.length>0){
-    histHtml='<div class="history-section"><h3>Snapshot History (last '+HISTORY.length+')</h3>';
-    HISTORY.slice().reverse().forEach(h=>{
-      const d=new Date(h.timestamp);
-      const ts=d.toLocaleString();
-      histHtml+=`<div class="history-item">${ts} &mdash; ${h.item_count} items tracked</div>`;
-    });
-    histHtml+='</div>';
-  }
-  document.getElementById('footerText').innerHTML=histHtml;
-}
-
-/* ══════════════════ CURRENCY EXCHANGE ══════════════════ */
-function renderCurrency(){
-  document.getElementById('suggestGrid').style.display='none';
-  document.getElementById('flipGrid').style.display='none';
-  const po=document.getElementById('currProfitOnly').checked;
-  const q=(document.getElementById('currSearch').value||'').toLowerCase();
-  let clist=CURRENCIES.filter(c=>{
-    if(po&&c.spread<=3)return false;
-    if(q&&!c.name.toLowerCase().includes(q))return false;
-    return true;
-  });
-  clist.sort((a,b)=>b.spread-a.spread);
-  const profitable=CURRENCIES.filter(c=>c.spread>3).length;
-  document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Currencies</div><div class="stat-val">${CURRENCIES.length}</div></div><div class="stat-card"><div class="stat-label">Profitable (&gt;3%)</div><div class="stat-val" style="color:var(--green)">${profitable}</div></div><div class="stat-card"><div class="stat-label">Arb Loops</div><div class="stat-val" style="color:var(--purple)">${ARB_LOOPS.length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${clist.length}</div></div>`;
-
-  /* Currency table — show real exchange ratios */
-  const cols=[{key:'name',label:'Currency'},{key:'chaos_eq',label:'Value'},{key:'display_buy',label:'Buy Rate'},{key:'display_sell',label:'Sell Rate'},{key:'spread',label:'Spread'},{key:'volume',label:'Volume'},{key:'reliable',label:''}];
-  document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';
-  if(!clist.length){document.getElementById('tbody').innerHTML='<tr><td colspan="7" class="empty">No currencies match</td></tr>';}
-  else{
-    document.getElementById('tbody').innerHTML=clist.slice(0,100).map(c=>{
-      const spreadColor=c.spread>5&&c.reliable==='yes'?'var(--green)':c.spread>2?'var(--yellow)':'var(--muted)';
-      const reliableTag=c.reliable==='check'?'<span style="color:var(--red);font-size:10px" title="Spread looks too high — verify in-game before trading">⚠ verify</span>':'';
-      return `<tr><td><strong>${esc(c.name)}</strong></td><td><span class="chaos-val">${c.chaos_eq}c</span></td><td style="font-size:12px">${esc(c.display_buy)}</td><td style="font-size:12px">${esc(c.display_sell)}</td><td><span style="color:${spreadColor};font-weight:600">${c.spread}%</span></td><td style="color:var(--muted)">${c.volume}</td><td>${reliableTag}</td></tr>`;
-    }).join('');
-  }
-
-  /* Arbitrage — only reliable spreads */
-  const ca=document.getElementById('currencyArea');
-  ca.innerHTML='<div style="margin:1rem 0 .5rem;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);line-height:1.6"><strong style="color:var(--yellow)">⚠ Important:</strong> poe.ninja ratios are averages, not exact listings. Always verify the actual buy/sell ratio in-game before flipping. Real spreads are tighter than shown. Look for currencies where you can buy at X:1c and sell at a lower ratio for profit.</div>';
-  if(ARB_LOOPS.length>0){
-    ca.innerHTML+='<h3 style="margin:1rem 0 .5rem;color:var(--accent);font-size:15px">Potential Currency Flips (verify in-game)</h3>'+ARB_LOOPS.map(l=>`<div class="arb-card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><span class="arb-path"><strong>${esc(l.name)}</strong></span><span class="arb-profit">${l.spread.toFixed(1)}% spread</span></div><div class="arb-detail">${esc(l.desc)}</div><div style="display:flex;gap:12px;margin-top:4px;font-size:12px;color:var(--muted)"><span>Volume: ${l.volume} listings</span></div></div>`).join('');
-  } else {
-    ca.innerHTML+='<div class="empty" style="margin-top:1rem">No reliable currency flips found (need 2-20% spread with 5+ listings).</div>';
-  }
-}
-
-/* ══════════════════ ZERO TO MIRROR ══════════════════ */
-function renderZ2M(){
-  document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';
-  const a=document.getElementById('z2mArea');
-  const defaultBudget=DIV_RATIO>0?Math.round(DIV_RATIO):200;
-  if(!a.getAttribute('data-init')){
-    a.setAttribute('data-init','1');
-    a.innerHTML=`<div class="z2m-input-row"><label style="font-size:13px;color:var(--muted)">Starting budget:</label><input type="number" id="z2mBudget" value="${defaultBudget}" min="1" step="100" style="font-size:18px;width:140px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcZ2M()">Plan Path to Mirror</button></div>
-    <div style="display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:1rem">
-      <span style="font-size:12px;color:var(--muted);width:100%">Enable/disable strategies:</span>
-      <label class="checkbox"><input type="checkbox" id="z2mFlip" checked> Flipping</label>
-      <label class="checkbox"><input type="checkbox" id="z2mCraft" checked> Crafting</label>
-      <label class="checkbox"><input type="checkbox" id="z2mCurrency" checked> Currency Exchange</label>
-      <label class="checkbox"><input type="checkbox" id="z2mCorrupt" checked> Corruption</label>
-      <label class="checkbox"><input type="checkbox" id="z2mGem" checked> Gem Leveling</label>
-    </div>
-    <div id="z2mResults"></div>`;
-  }
-}
-function calcZ2M(){
-  const startBudget=parseFloat(document.getElementById('z2mBudget').value)||DIV_RATIO||200;
-  const mirrorPrice=MIRROR_PRICE>0?MIRROR_PRICE:50000;
-  const res=document.getElementById('z2mResults');
-
-  // Strategy toggles
-  const useFlip=document.getElementById('z2mFlip').checked;
-  const useCraft=document.getElementById('z2mCraft').checked;
-  const useCurrency=document.getElementById('z2mCurrency').checked;
-  const useCorrupt=document.getElementById('z2mCorrupt').checked;
-  const useGem=document.getElementById('z2mGem').checked;
-
-  /* Phase boundaries */
-  const p1End=startBudget*2;
-  const p2End=startBudget*10;
-  const p3End=startBudget*50;
-  const p4End=mirrorPrice;
-
-  /* Find items for each phase */
-  function findPhaseItems(minBuy,maxBuy,count){
-    let candidates=[];
-    /* From flips */
-    if(useFlip){
-      FLIPS.forEach(f=>{
-        if(f.buy_price>=minBuy&&f.buy_price<=maxBuy&&f.profit>0){
-          candidates.push({name:f.name,buy:f.buy_price,sell:f.sell_price,profit:f.profit,action:f.flip_type+': '+f.reason,type:'flip'});
-        }
-      });
-    }
-    /* From crafts */
-    if(useCraft){
-      DATA.filter(d=>d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy&&d.craft_method!=='corrupt').forEach(d=>{
-        candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'craft'});
-      });
-    }
-    /* From corruptions */
-    if(useCorrupt){
-      DATA.filter(d=>d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy&&(d.craft_method==='corrupt'||d.craft_method==='double_corrupt')).forEach(d=>{
-        candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'corrupt'});
-      });
-    }
-    /* From gem leveling */
-    if(useGem){
-      DATA.filter(d=>d.type==='SkillGem'&&d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy).forEach(d=>{
-        candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:'Level/quality gem',type:'gem'});
-      });
-    }
-    /* From currency flips — only reliable ones with realistic spreads */
-    if(useCurrency){
-      CURRENCIES.filter(c=>c.spread>2&&c.spread<20&&c.reliable==='yes'&&c.chaos_eq>=0.1).forEach(c=>{
-        const investAmt=Math.max(minBuy,50);
-        const profitPerCycle=Math.round(investAmt*c.spread/100);
-        if(profitPerCycle>0){
-          candidates.push({name:c.name+' exchange',buy:investAmt,sell:investAmt+profitPerCycle,profit:profitPerCycle,action:'Buy/sell '+c.name+' ('+c.spread+'% spread, verify in-game)',type:'currency'});
-        }
-      });
-    }
-    candidates.sort((a,b)=>{
-      const roiA=a.profit/a.buy;
-      const roiB=b.profit/b.buy;
-      return roiB-roiA;
-    });
-    const seen=new Set();
-    const result=[];
-    for(const c of candidates){
-      if(seen.has(c.name))continue;
-      seen.add(c.name);
-      result.push(c);
-      if(result.length>=count)break;
-    }
-    return result;
-  }
-
-  const phases=[
-    {name:'Phase 1: Starter',target:`${fmt(Math.round(startBudget))}c to ${fmt(Math.round(p1End))}c`,startC:startBudget,endC:p1End,items:findPhaseItems(1,startBudget,5),desc:'Double your money with low-risk flips and crafts'},
-    {name:'Phase 2: Builder',target:`${fmt(Math.round(p1End))}c to ${fmt(Math.round(p2End))}c`,startC:p1End,endC:p2End,items:findPhaseItems(Math.round(startBudget*0.5),Math.round(p1End*2),5),desc:'Scale up with 6-link flipping, bulk gem leveling, mid-tier uniques'},
-    {name:'Phase 3: Investor',target:`${fmt(Math.round(p2End))}c to ${fmt(Math.round(p3End))}c`,startC:p2End,endC:p3End,items:findPhaseItems(Math.round(p1End),Math.round(p2End*2),5),desc:'High-value crafts, double corruptions, meta build item flipping'},
-    {name:'Phase 4: Endgame',target:`${fmt(Math.round(p3End))}c to ${fmt(Math.round(p4End))}c (Mirror)`,startC:p3End,endC:p4End,items:findPhaseItems(Math.round(p2End),Math.round(p3End*2),5),desc:'Bulk flipping strategies, high-end crafts, final push'},
-  ];
-
-  /* Determine current phase */
-  let currentPhase=0;
-  if(startBudget>=p3End)currentPhase=3;
-  else if(startBudget>=p2End)currentPhase=2;
-  else if(startBudget>=p1End)currentPhase=1;
-
-  const overallPct=Math.min(100,Math.round(startBudget/mirrorPrice*100*100)/100);
-
-  let html=`<div class="z2m-overall-progress"><div class="z2m-overall-label">Progress to Mirror (${fmt(Math.round(mirrorPrice))}c)</div><div class="z2m-overall-val">${overallPct}% &mdash; ${fmt(Math.round(startBudget))}c / ${fmt(Math.round(mirrorPrice))}c</div><div class="z2m-progress" style="margin-top:8px"><div class="z2m-progress-fill" style="width:${overallPct}%"></div></div></div>`;
-
-  phases.forEach((ph,i)=>{
-    const isActive=i===currentPhase;
-    const totalProfit=ph.items.reduce((s,it)=>s+it.profit,0);
-    const phasePct=ph.endC>ph.startC?Math.min(100,Math.max(0,Math.round((startBudget-ph.startC)/(ph.endC-ph.startC)*100))):0;
-    const phaseProgress=i<currentPhase?100:(i===currentPhase?Math.max(0,phasePct):0);
-
-    /* Calculate cycles needed */
-    const gap=ph.endC-Math.max(startBudget,ph.startC);
-    const avgProfit=totalProfit>0?Math.round(totalProfit/ph.items.length):1;
-    const cyclesNeeded=avgProfit>0?Math.ceil(Math.max(0,gap)/avgProfit):999;
-
-    html+=`<div class="z2m-phase${isActive?' active-phase':''}"><div class="z2m-phase-header"><div><span class="z2m-phase-name">${ph.name}</span><span style="font-size:12px;color:var(--muted);margin-left:8px">${ph.desc}</span></div><span class="z2m-phase-target">${ph.target}</span></div><div class="z2m-progress"><div class="z2m-progress-fill" style="width:${phaseProgress}%"></div></div>`;
-
-    if(ph.items.length>0){
-      html+=ph.items.map(it=>`<div class="z2m-item"><div><span class="z2m-item-name">${esc(it.name)}</span><span class="z2m-item-detail" style="margin-left:8px">Buy at <span class="chaos-val">${fmt(it.buy)}c</span>, ${esc(it.action)}, sell for <span class="chaos-val">${fmt(it.sell)}c</span></span></div><span class="z2m-item-profit">+${fmt(it.profit)}c</span></div>`).join('');
-    } else {
-      html+='<div class="z2m-item"><span class="z2m-item-detail">No specific items found in this price range. Try manual trading or bulk strategies.</span></div>';
-    }
-
-    html+=`<div class="z2m-summary"><span>Start: <strong class="chaos-val">${fmt(Math.round(ph.startC))}c</strong></span><span>End: <strong class="chaos-val">${fmt(Math.round(ph.endC))}c</strong></span><span>Expected profit/cycle: <strong class="profit-positive">+${fmt(totalProfit)}c</strong></span><span>Est. cycles: <strong>${cyclesNeeded}</strong></span></div></div>`;
-  });
-
-  /* Final note */
-  const remainingGap=Math.max(0,mirrorPrice-startBudget);
-  const avgAllProfit=phases.reduce((s,p)=>s+p.items.reduce((s2,it)=>s2+it.profit,0),0);
-  const totalCycles=avgAllProfit>0?Math.ceil(remainingGap/(avgAllProfit/4)):999;
-  html+=`<div style="margin-top:1rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted)"><strong style="color:var(--accent)">Summary:</strong> You need <strong class="chaos-val">${fmt(Math.round(remainingGap))}c</strong> more to reach a Mirror. At an average of ~${fmt(Math.round(avgAllProfit/4))}c profit per cycle across all phases, you need roughly <strong>${totalCycles}</strong> more trade cycles. Good luck, Exile!</div>`;
-
-  res.innerHTML=html;
-}
-
-function renderWhale(){
-  const sf=document.getElementById('whaleStrategy').value;
-  const tf=document.getElementById('whaleTag').value;
-  const mc=parseFloat(document.getElementById('whaleMaxCost').value)||99999;
-  const ml=parseInt(document.getElementById('whaleMaxList').value)||999;
-  const co=document.getElementById('whaleCornerable').checked;
-  const q=document.getElementById('whaleSearch').value.toLowerCase();
-
-  // Map strategy to tag
-  const stratTags={corner:'flipping','6link_flip':'flipping',gem_level:'leveling',double_corrupt:'corruption',vaal_corrupt:'corruption',tainted_chaos_jewels:'corruption',harvest_fracture:'crafting',essence_craft:'crafting'};
-
-  let items=WHALES.filter(w=>{
-    if(sf!=='all'){
-      if(!w.strategies.some(s=>s.id===sf))return false;
-    }
-    if(tf!=='all'){
-      const matching=WHALE_STRATS.filter(s=>s.tag===tf).map(s=>s.id);
-      if(!w.strategies.some(s=>matching.includes(s.id)))return false;
-    }
-    if(w.best_cost>mc)return false;
-    if(w.listings>ml)return false;
-    if(co&&w.corner_score<=0)return false;
-    if(q&&!w.name.toLowerCase().includes(q))return false;
-    return true;
-  });
-
-  const total=WHALES.length;
-  const cornerable=WHALES.filter(w=>w.corner_score>0).length;
-  const highP=items.filter(w=>w.best_profit>=500).length;
-
-  document.getElementById('stats').innerHTML=`
-    <div class="stat-card"><div class="stat-label">Whale Targets</div><div class="stat-val">${total}</div></div>
-    <div class="stat-card"><div class="stat-label">Cornerable</div><div class="stat-val" style="color:var(--purple)">${cornerable}</div></div>
-    <div class="stat-card"><div class="stat-label">500c+ Profit</div><div class="stat-val" style="color:var(--green)">${highP}</div></div>
-    <div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;
-
-  document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';
-  const g=document.getElementById('whaleGrid');
-  if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No whale targets match filters</div>';return;}
-
-  const stratColors={corner:'var(--purple)','6link_flip':'var(--green)',gem_level:'var(--blue)',double_corrupt:'var(--red)',vaal_corrupt:'var(--red)',tainted_chaos_jewels:'var(--orange)',harvest_fracture:'var(--green)',essence_craft:'var(--yellow)'};
-  const stratNames={corner:'Corner Supply','6link_flip':'6-Link Flip',gem_level:'Gem Level',double_corrupt:'Double Corrupt',vaal_corrupt:'Vaal Corrupt',tainted_chaos_jewels:'Tainted Chaos',harvest_fracture:'Harvest Fracture',essence_craft:'Essence Craft'};
-
-  g.innerHTML=items.slice(0,60).map(w=>{
-    const badges=[];
-    if(w.builds&&w.builds.length)w.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));
-
-    // Corner score bar
-    const cornerHtml=w.corner_score>0?`<div style="display:flex;align-items:center;gap:6px;margin:6px 0"><span style="font-size:11px;color:var(--purple);font-weight:600">Corner Score: ${w.corner_score}/100</span><div style="width:80px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:${w.corner_score}%;background:var(--purple);border-radius:3px"></div></div></div>`:'';
-
-    // Strategy pills
-    const stratPills=w.strategies.map(s=>`<span style="display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin:2px;background:${stratColors[s.id]||'var(--muted)'}20;color:${stratColors[s.id]||'var(--muted)'};border:1px solid ${stratColors[s.id]||'var(--muted)'}40">${stratNames[s.id]||s.id} +${fmt(s.profit)}c</span>`).join('');
-
-    // Listings warning + confidence
-    const listColor=w.listings<=3?'var(--red)':w.listings<=10?'var(--yellow)':'var(--muted)';
-    const listWarn=w.listings<=5?'<span style="font-size:10px;color:var(--red);font-weight:600"> LOW SUPPLY</span>':'';
-    const cf=w.confidence||95;
-    const confHtml=cf<=50?`<div style="display:flex;align-items:center;gap:4px;margin:2px 0"><span style="font-size:10px;color:${confColor(cf)};font-weight:600">${confLabel(cf)} price</span><div class="conf-bar"><div class="conf-fill" style="width:${cf}%;background:${confColor(cf)}"></div></div></div>`:'';
-
-    // Why this item
-    const reasonHtml=w.item_reason?`<div style="font-size:11px;color:var(--blue);margin-bottom:6px;padding:4px 8px;background:var(--blue)10;border-radius:4px;border-left:3px solid var(--blue)">${esc(w.item_reason)}</div>`:'';
-
-    return `<div class="flip-card" style="border-color:${w.corner_score>50?'var(--purple)':'var(--border)'}">
-      <div class="flip-header">
-        <span class="flip-name">${esc(w.name)}${w.variant?` <span style="font-size:11px;color:var(--muted);font-weight:400">(${esc(w.variant)})</span>`:''}</span>
-        <span class="tier-badge" style="color:${w.tier_color};border-color:${w.tier_color}30;background:${w.tier_color}18">${esc(w.tier_label)}</span>
-      </div>
-      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-        <span class="chaos-val" style="font-size:16px">${fmt(w.chaos)}c</span>${cf<=25?'<span style="font-size:10px;color:var(--red);font-weight:600" title="Very few listings on poe.ninja — price may not reflect actual market"> ⚠</span>':''}
-        <span style="font-size:12px;color:${listColor};font-weight:600" title="Approximate count from poe.ninja — check trade site for real listings">~${w.listings} listed${listWarn}</span>
-        <span style="font-size:12px;color:var(--muted)">${TL[w.type]||w.type}</span>
-        ${badges.join('')}
-      </div>
-      ${confHtml}
-      ${reasonHtml}
-      ${cornerHtml}
-      <div style="margin:8px 0;padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
-        <div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Best Strategy: ${stratNames[w.best_strategy]||w.best_strategy}</div>
-        <div style="font-size:12px;color:var(--text);line-height:1.5">${esc(w.best_detail)}</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
-          <span style="font-size:11px;color:var(--muted)">Cost: <span class="chaos-val">${fmt(w.best_cost)}c</span></span>
-          <span style="font-size:11px;color:var(--muted)">Expected: <span class="profit-${w.best_profit>=500?'high':'positive'}">+${fmt(w.best_profit)}c</span></span>
-        </div>
-      </div>
-      ${w.strategies.length>1?`<div style="margin-top:6px"><span style="font-size:10px;color:var(--muted)">Also viable:</span> ${stratPills}</div>`:''}
-      <div style="margin-top:8px;display:flex;gap:6px;align-items:center"><a class="trade-link" href="${tradeUrlOfficial(w.name)}" target="_blank">Trade ➜</a><a class="trade-link-ninja" href="${tradeUrl(w.name,w.trade_cat)}" target="_blank">ninja</a></div>
-    </div>`;
-  }).join('');
-}
-
-function renderGuide(){
-  document.getElementById('stats').innerHTML='';document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';
-  document.getElementById('guideArea').innerHTML=`<div class="guide-wrap">
-  <div class="guide-section"><div class="guide-summary"><strong>Tools &amp; Resources</strong> &mdash; Everything you need to make currency in PoE, all in one place.</div></div>
-  ${[
-    ['Essential Tools','<ul><li><strong>Awakened PoE Trade</strong> &mdash; in-game price checking overlay (Ctrl+D on items). Get it at: <a href="https://snosme.github.io/awakened-poe-trade" target="_blank" style="color:var(--blue)">snosme.github.io/awakened-poe-trade</a></li><li><strong>poe.ninja</strong> &mdash; real-time market data (you\'re looking at it). API-powered. <a href="https://poe.ninja" target="_blank" style="color:var(--blue)">poe.ninja</a></li><li><strong>Craft of Exile</strong> &mdash; simulate crafts before spending currency. <a href="https://craftofexile.com" target="_blank" style="color:var(--blue)">craftofexile.com</a></li><li><strong>Wealthy Exile</strong> &mdash; wealth tracking, chaos/hour, stash breakdowns. <a href="https://wealthyexile.com" target="_blank" style="color:var(--blue)">wealthyexile.com</a></li><li><strong>Exilence Next</strong> &mdash; net worth tracker, profit tracking per session.</li></ul>'],
-    ['Currency Making Methods','<ul><li><strong>Bulk Trading:</strong> Buy essences/scarabs/fossils cheap in small quantities, sell in bulk for 20-40% premium.</li><li><strong>Currency Flipping:</strong> Buy/sell same currency to different players. Use this dashboard\'s Currency tab to find spreads.</li><li><strong>Boss Farming:</strong> Farm specific bosses for guaranteed drops. Maven, Sirus, Uber Elder.</li><li><strong>Crafting Services:</strong> Use Craft of Exile to plan, offer services in trade chat.</li><li><strong>Vendor Recipes:</strong> Full rare set (ilvl 60-74) = 1 chaos. Unidentified = 2 chaos.</li><li><strong>Lab Running:</strong> Enchant popular helmets, sell for premium.</li><li><strong>Heist:</strong> Run grand heists for raw currency and unique drops.</li><li><strong>Div Card Investing:</strong> Buy incomplete sets below completion value.</li></ul>'],
-    ['Pro Tips','<ul><li>Always check poe.ninja 7-day trend before buying.</li><li>Use Awakened PoE Trade for instant in-game price checks.</li><li>Track your chaos/hour with Wealthy Exile or Exilence.</li><li>This dashboard works best when run morning + evening for alert coverage.</li><li>Start with the Budget Planner to get a focused plan before trading.</li></ul>'],
-    ['Price Tiers','<span class="guide-color" style="background:#888"></span>Under 1 div = base material. <span class="guide-color" style="background:#5b9bd5"></span>1-3 div = cheap targets. <span class="guide-color" style="background:#4CAF82"></span>3-6 div = mid profit zone. <span class="guide-color" style="background:#d4a017"></span>6-10 div = solid. <span class="guide-color" style="background:#e08833"></span>11-15 div = high value. <span class="guide-color" style="background:#e05555"></span>15+ div = chase items.'],
-    ['Meta Builds','<span class="badge badge-build">PC PF</span> Poisonous Concoction PF, <span class="badge badge-build">LA DE</span> Lightning Arrow DE, <span class="badge badge-build">GC Mine</span> Glacial Cascade Miner, <span class="badge badge-build">RF Chief</span> Righteous Fire Chief, <span class="badge badge-build">CWS Chief</span> CWS Chieftain, <span class="badge badge-build">Bleed Glad</span> Bleed Bow Glad. Items for these builds get blue badges and higher demand.'],
-    ['Alert Types','<ul><li><span class="badge-alert alert-spike">SPIKE</span> = +25% price increase.</li><li><span class="badge-alert alert-crash">CRASH</span> = -25% price drop.</li><li><span class="badge-alert alert-drying">DRYING</span> = listings dropping fast.</li><li><span class="badge-alert alert-flood">FLOOD</span> = listings surging.</li><li><span class="badge-alert alert-new">NEW</span> = new item appeared.</li><li><span class="badge-alert alert-underpriced">UNDERPRICED</span> = &gt;30% below median + high demand. Best buy signal.</li><li><span class="badge-alert alert-meta_spike">META SPIKE</span> = meta build item with rising price.</li><li><span class="badge-alert alert-corner_risk">CORNER RISK</span> = supply collapsed, possible market manipulation.</li></ul>'],
-    ['Workflow','1. Run script before session. 2. Check Alerts for changes. 3. Check Flip Finder for quick wins. 4. Check Currency tab for exchange profits. 5. Budget Planner for craft plan. 6. Use Zero to Mirror for long-term goals. 7. Click Trade links to buy. 8. Run again after session.'],
-  ].map(([t,b])=>`<div class="guide-section"><div class="guide-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.guide-arrow').classList.toggle('open')"><h2>${t}</h2><span class="guide-arrow">&#9660;</span></div><div class="guide-body"><p>${b}</p></div></div>`).join('')}
-  </div>`;
-}
-
-function renderTable(cols,items){
-  document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>{const a=sortKey===c.key?(sortDir===-1?' \u2193':' \u2191'):'';return `<th class="${sortKey===c.key?'sorted':''}" onclick="setSort('${c.key}')">${c.label}${a}</th>`;}).join('')+'</tr>';
-  if(!items.length){document.getElementById('tbody').innerHTML=`<tr><td colspan="${cols.length}" class="empty">No items match</td></tr>`;return;}
-  document.getElementById('tbody').innerHTML=items.slice(0,200).map(r=>'<tr>'+cols.map(c=>`<td>${fmtCell(c.fmt,r[c.key],r)}</td>`).join('')+'</tr>').join('');
-}
+function renderEconomy(){buildTabs();const mc=parseFloat(document.getElementById('minChaos').value)||0,ml=parseInt(document.getElementById('maxListings').value)||99999,sl=document.getElementById('sixLink').checked,ho=document.getElementById('hotOnly').checked,up=document.getElementById('underpricedOnly').checked,q=document.getElementById('search').value.toLowerCase();let items=DATA.filter(d=>d.type===activeType).filter(d=>{if(d.chaos<mc)return false;if(d.listings>ml)return false;if(sl&&d.links<6)return false;if(ho&&d.score<60)return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*av.localeCompare(bv);return sortDir*((bv||0)-(av||0));});const all=DATA.filter(d=>d.type===activeType);document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total</div><div class="stat-val">${all.length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${all.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Hot (60+)</div><div class="stat-val">${all.filter(d=>d.score>=60).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;const cols=getCols();renderTable(cols[activeType]||cols.default,items);}
+function renderCraft(){const mf=document.getElementById('craftMethod').value,tf=document.getElementById('craftTier').value,mp=parseFloat(document.getElementById('minProfit').value)||0,mo=document.getElementById('metaOnly').checked,q=document.getElementById('craftSearch').value.toLowerCase();let items=DATA.filter(d=>d.craft_method).filter(d=>{if(mf!=='all'&&d.craft_method!==mf)return false;if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.craft_profit<mp)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*(av||'').localeCompare(bv||'');return sortDir*((bv||0)-(av||0));});const cr=DATA.filter(d=>d.craft_method);document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Craftable</div><div class="stat-val">${cr.length}</div></div><div class="stat-card"><div class="stat-label">Meta</div><div class="stat-val">${cr.filter(d=>d.builds&&d.builds.length).length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${cr.filter(d=>d.craft_profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;renderTable(getCC(),items);}
+function renderSuggest(){const tf=document.getElementById('suggestTier').value,md=parseInt(document.getElementById('suggestMinDemand').value)||0,mo=document.getElementById('suggestMeta').checked,up=document.getElementById('suggestUnderpriced').checked,q=document.getElementById('suggestSearch').value.toLowerCase();let items=DATA.filter(d=>d.top3&&d.top3.length>0&&d.top3[0].profit>0).filter(d=>{if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.demand<md)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>(b.top3[0].profit||0)-(a.top3[0].profit||0));document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">2+ options</div><div class="stat-val">${items.filter(d=>d.top3.length>=2).length}</div></div><div class="stat-card"><div class="stat-label">High demand</div><div class="stat-val" style="color:var(--red)">${items.filter(d=>d.demand>=60).length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${items.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('suggestGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No items match</div>';return;}g.innerHTML=items.slice(0,80).map(r=>{const badges=[];if(proMode){if(r.builds&&r.builds.length)r.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));if(r.links>=6)badges.push('<span class="badge badge-6l">6L</span>');if(r.underpriced>0)badges.push(`<span class="badge badge-underpriced">${r.underpriced}%</span>`);}const showOpts=proMode?r.top3:r.top3.slice(0,1);if(!proMode){const o=showOpts[0];return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta">${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options"><div class="suggest-option best"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span></div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div></div></div></div>`;}const opts=showOpts.map((o,i)=>{const profitHtml=o.profit>0?`<span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span>`:`<span style="color:var(--red)">-EV</span>`;return `<div class="suggest-option${i===0?' best':''}"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="suggest-option-num opt-${i+1}">${i+1}</span><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span>${i===0?'<span class="best-label">BEST</span>':''}</div>${profitHtml}</div><div class="suggest-option-reason">${esc(o.reason)}</div><div class="suggest-option-footer"><span class="risk-${o.risk||'low'}">Risk: ${(o.risk||'low').toUpperCase()}</span></div></div>`;}).join('');return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta"><span class="tier-badge" style="color:${r.tier_color};border-color:${r.tier_color}30;background:${r.tier_color}18">${esc(r.tier_label)}</span><span style="font-size:12px;color:var(--muted)">${TL[r.type]||r.type}</span>${sparkSvg(r.spark)}${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options">${opts}</div></div>`;}).join('');}
+function renderFlip(){const ft=document.getElementById('flipType').value,mp=parseFloat(document.getElementById('flipMinProfit').value)||0,mo=document.getElementById('flipMetaOnly').checked,q=document.getElementById('flipSearch').value.toLowerCase();let items=FLIPS.filter(f=>{if(ft!=='all'&&f.flip_type!==ft)return false;if(f.profit<mp)return false;if(mo&&(!f.builds||!f.builds.length))return false;if(q&&!f.name.toLowerCase().includes(q))return false;return true;});document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total flips</div><div class="stat-val">${FLIPS.length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${FLIPS.filter(f=>f.profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">6-Link arb</div><div class="stat-val">${FLIPS.filter(f=>f.flip_type==='6-Link Spread').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('flipGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No flips match</div>';return;}const fc={'6-Link Spread':'flip-6link','Gem Level Gap':'flip-gem','Price Gap':'flip-price'};g.innerHTML=items.slice(0,80).map(f=>{if(!proMode){return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}const badges=[];if(f.builds&&f.builds.length)f.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}).join('');}
+function renderBudget(){document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';const a=document.getElementById('budgetArea');if(!a.innerHTML)a.innerHTML=`<div class="budget-input-row"><label>My budget:</label><input type="number" id="budgetAmt" value="2000" min="50" step="100" style="font-size:18px;width:120px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcBudget()">Calculate Plan</button><div class="control-group" style="margin-left:12px"><label class="checkbox"><input type="checkbox" id="budgetMeta"> Meta only</label></div></div><div id="budgetResults"></div>`;}
+function calcBudget(){const budget=parseFloat(document.getElementById('budgetAmt').value)||2000,mo=document.getElementById('budgetMeta').checked;const cc={'6-link':${0},'corrupt':${0},'double_corrupt':${0},'harvest':${0},'fracture':${0},'essence':${0}};let cands=DATA.filter(d=>d.craft_profit>0&&d.chaos>0&&d.chaos<=budget);if(mo)cands=cands.filter(d=>d.builds&&d.builds.length);cands=cands.map(d=>{const c=cc[d.craft_method]||100;const tc=d.chaos+c;return{...d,total_cost:tc,roi:d.craft_profit/tc};}).filter(d=>d.total_cost<=budget);cands.sort((a,b)=>b.roi-a.roi);let rem=budget,plan=[],tp=0,ts=0;const used=new Set();for(const c of cands){if(rem<c.total_cost)continue;const k=c.name+'|'+c.type;if(used.has(k))continue;used.add(k);rem=Math.round(rem-c.total_cost);tp+=c.craft_profit;ts+=c.total_cost;plan.push(c);if(plan.length>=15)break;}const roi=ts>0?Math.round(tp/ts*100):0;const r=document.getElementById('budgetResults');if(!plan.length){r.innerHTML='<div class="empty">No profitable crafts found. Try increasing budget.</div>';return;}r.innerHTML=`<div class="budget-summary"><div class="budget-summary-item"><div class="budget-summary-label">Budget</div><div class="budget-summary-val">${fmt(budget)}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Spent</div><div class="budget-summary-val">${fmt(Math.round(ts))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Profit</div><div class="budget-summary-val" style="color:var(--green)">+${fmt(Math.round(tp))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">ROI</div><div class="budget-summary-val">${roi}%</div></div><div class="budget-summary-item"><div class="budget-summary-label">Left</div><div class="budget-summary-val" style="color:var(--muted)">${fmt(rem)}c</div></div></div><div class="budget-plan" style="margin-top:14px">${plan.map((p,i)=>{const bg=[];if(p.builds&&p.builds.length)p.builds.forEach(b=>bg.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="budget-item"><div class="budget-item-left"><span class="budget-step">${i+1}</span><span class="budget-item-name">${esc(p.name)}</span><span class="craft-method-badge method-${p.craft_method}">${ML[p.craft_method]||p.craft_method}</span>${bg.join('')}</div><div class="budget-item-right"><span style="font-size:12px;color:var(--muted)">Buy: <span class="chaos-val">${fmt(p.chaos)}c</span></span><span style="font-size:12px;color:var(--muted)">${esc(p.craft_action)}</span><span class="profit-positive">+${fmt(p.craft_profit)}c</span><a class="trade-link" href="${tradeUrlOfficial(p.name)}" target="_blank">Buy &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(p.name,p.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('')}</div>`;}
+function renderAlerts(){const af=document.getElementById('alertType').value,q=document.getElementById('alertSearch').value.toLowerCase();let items=DATA.filter(d=>d.alert).filter(d=>{if(af!=='all'&&d.alert!==af)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>Math.abs(b.price_change||0)-Math.abs(a.price_change||0));const aa=DATA.filter(d=>d.alert);document.getElementById('alertDot').style.display=aa.length?'inline-block':'none';document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Alerts</div><div class="stat-val" style="color:var(--red)">${aa.length}</div></div><div class="stat-card"><div class="stat-label">Spikes</div><div class="stat-val" style="color:var(--red)">${aa.filter(d=>d.alert==='spike').length}</div></div><div class="stat-card"><div class="stat-label">Crashes</div><div class="stat-val" style="color:var(--blue)">${aa.filter(d=>d.alert==='crash').length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${aa.filter(d=>d.alert==='underpriced').length}</div></div><div class="stat-card"><div class="stat-label">Meta Spike</div><div class="stat-val" style="color:var(--orange)">${aa.filter(d=>d.alert==='meta_spike').length}</div></div><div class="stat-card"><div class="stat-label">Corner Risk</div><div class="stat-val" style="color:var(--purple)">${aa.filter(d=>d.alert==='corner_risk').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;renderTable(AC,items);let histHtml='';if(HISTORY&&HISTORY.length>0){histHtml='<div class="history-section"><h3>Snapshot History (last '+HISTORY.length+')</h3>';HISTORY.slice().reverse().forEach(h=>{const d=new Date(h.timestamp);const ts=d.toLocaleString();histHtml+=`<div class="history-item">${ts} &mdash; ${h.item_count} items tracked</div>`;});histHtml+='</div>';}document.getElementById('footerText').innerHTML=histHtml;}
+function renderCurrency(){document.getElementById('suggestGrid').style.display='none';document.getElementById('flipGrid').style.display='none';const po=document.getElementById('currProfitOnly').checked;const q=(document.getElementById('currSearch').value||'').toLowerCase();let clist=CURRENCIES.filter(c=>{if(po&&c.spread<=3)return false;if(q&&!c.name.toLowerCase().includes(q))return false;return true;});clist.sort((a,b)=>b.spread-a.spread);const profitable=CURRENCIES.filter(c=>c.spread>3).length;document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Currencies</div><div class="stat-val">${CURRENCIES.length}</div></div><div class="stat-card"><div class="stat-label">Profitable (&gt;3%)</div><div class="stat-val" style="color:var(--green)">${profitable}</div></div><div class="stat-card"><div class="stat-label">Arb Loops</div><div class="stat-val" style="color:var(--purple)">${ARB_LOOPS.length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${clist.length}</div></div>`;const cols=[{key:'name',label:'Currency'},{key:'chaos_eq',label:'Value'},{key:'display_buy',label:'Buy Rate'},{key:'display_sell',label:'Sell Rate'},{key:'spread',label:'Spread'},{key:'volume',label:'Volume'},{key:'reliable',label:''}];document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';if(!clist.length){document.getElementById('tbody').innerHTML='<tr><td colspan="7" class="empty">No currencies match</td></tr>';}else{document.getElementById('tbody').innerHTML=clist.slice(0,100).map(c=>{const spreadColor=c.spread>5&&c.reliable==='yes'?'var(--green)':c.spread>2?'var(--yellow)':'var(--muted)';const reliableTag=c.reliable==='check'?'<span style="color:var(--red);font-size:10px" title="Spread looks too high — verify in-game before trading">⚠ verify</span>':'';return `<tr><td><strong>${esc(c.name)}</strong></td><td><span class="chaos-val">${c.chaos_eq}c</span></td><td style="font-size:12px">${esc(c.display_buy)}</td><td style="font-size:12px">${esc(c.display_sell)}</td><td><span style="color:${spreadColor};font-weight:600">${c.spread}%</span></td><td style="color:var(--muted)">${c.volume}</td><td>${reliableTag}</td></tr>`;}).join('');}const ca=document.getElementById('currencyArea');ca.innerHTML='<div style="margin:1rem 0 .5rem;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);line-height:1.6"><strong style="color:var(--yellow)">⚠ Important:</strong> poe.ninja ratios are averages, not exact listings. Always verify the actual buy/sell ratio in-game before flipping. Real spreads are tighter than shown. Look for currencies where you can buy at X:1c and sell at a lower ratio for profit.</div>';if(ARB_LOOPS.length>0){ca.innerHTML+='<h3 style="margin:1rem 0 .5rem;color:var(--accent);font-size:15px">Potential Currency Flips (verify in-game)</h3>'+ARB_LOOPS.map(l=>`<div class="arb-card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><span class="arb-path"><strong>${esc(l.name)}</strong></span><span class="arb-profit">${l.spread.toFixed(1)}% spread</span></div><div class="arb-detail">${esc(l.desc)}</div><div style="display:flex;gap:12px;margin-top:4px;font-size:12px;color:var(--muted)"><span>Volume: ${l.volume} listings</span></div></div>`).join('');}else{ca.innerHTML+='<div class="empty" style="margin-top:1rem">No reliable currency flips found (need 2-20% spread with 5+ listings).</div>';}}
+function renderZ2M(){document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';const a=document.getElementById('z2mArea');const defaultBudget=DIV_RATIO>0?Math.round(DIV_RATIO):200;if(!a.getAttribute('data-init')){a.setAttribute('data-init','1');a.innerHTML=`<div class="z2m-input-row"><label style="font-size:13px;color:var(--muted)">Starting budget:</label><input type="number" id="z2mBudget" value="${defaultBudget}" min="1" step="100" style="font-size:18px;width:140px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcZ2M()">Plan Path to Mirror</button></div><div style="display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:1rem"><span style="font-size:12px;color:var(--muted);width:100%">Enable/disable strategies:</span><label class="checkbox"><input type="checkbox" id="z2mFlip" checked> Flipping</label><label class="checkbox"><input type="checkbox" id="z2mCraft" checked> Crafting</label><label class="checkbox"><input type="checkbox" id="z2mCurrency" checked> Currency Exchange</label><label class="checkbox"><input type="checkbox" id="z2mCorrupt" checked> Corruption</label><label class="checkbox"><input type="checkbox" id="z2mGem" checked> Gem Leveling</label></div><div id="z2mResults"></div>`;}}
+function calcZ2M(){const startBudget=parseFloat(document.getElementById('z2mBudget').value)||DIV_RATIO||200;const mirrorPrice=MIRROR_PRICE>0?MIRROR_PRICE:50000;const res=document.getElementById('z2mResults');const useFlip=document.getElementById('z2mFlip').checked;const useCraft=document.getElementById('z2mCraft').checked;const useCurrency=document.getElementById('z2mCurrency').checked;const useCorrupt=document.getElementById('z2mCorrupt').checked;const useGem=document.getElementById('z2mGem').checked;const p1End=startBudget*2;const p2End=startBudget*10;const p3End=startBudget*50;const p4End=mirrorPrice;function findPhaseItems(minBuy,maxBuy,count){let candidates=[];if(useFlip){FLIPS.forEach(f=>{if(f.buy_price>=minBuy&&f.buy_price<=maxBuy&&f.profit>0){candidates.push({name:f.name,buy:f.buy_price,sell:f.sell_price,profit:f.profit,action:f.flip_type+': '+f.reason,type:'flip'});}});}if(useCraft){DATA.filter(d=>d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy&&d.craft_method!=='corrupt').forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'craft'});});}if(useCorrupt){DATA.filter(d=>d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy&&(d.craft_method==='corrupt'||d.craft_method==='double_corrupt')).forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'corrupt'});});}if(useGem){DATA.filter(d=>d.type==='SkillGem'&&d.craft_profit>0&&d.chaos>=minBuy&&d.chaos<=maxBuy).forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:'Level/quality gem',type:'gem'});});}if(useCurrency){CURRENCIES.filter(c=>c.spread>2&&c.spread<20&&c.reliable==='yes'&&c.chaos_eq>=0.1).forEach(c=>{const investAmt=Math.max(minBuy,50);const profitPerCycle=Math.round(investAmt*c.spread/100);if(profitPerCycle>0){candidates.push({name:c.name+' exchange',buy:investAmt,sell:investAmt+profitPerCycle,profit:profitPerCycle,action:'Buy/sell '+c.name+' ('+c.spread+'% spread, verify in-game)',type:'currency'});}});}candidates.sort((a,b)=>{const roiA=a.profit/a.buy;const roiB=b.profit/b.buy;return roiB-roiA;});const seen=new Set();const result=[];for(const c of candidates){if(seen.has(c.name))continue;seen.add(c.name);result.push(c);if(result.length>=count)break;}return result;}const phases=[{name:'Phase 1: Starter',target:`${fmt(Math.round(startBudget))}c to ${fmt(Math.round(p1End))}c`,startC:startBudget,endC:p1End,items:findPhaseItems(1,startBudget,5),desc:'Double your money with low-risk flips and crafts'},{name:'Phase 2: Builder',target:`${fmt(Math.round(p1End))}c to ${fmt(Math.round(p2End))}c`,startC:p1End,endC:p2End,items:findPhaseItems(Math.round(startBudget*0.5),Math.round(p1End*2),5),desc:'Scale up with 6-link flipping, bulk gem leveling, mid-tier uniques'},{name:'Phase 3: Investor',target:`${fmt(Math.round(p2End))}c to ${fmt(Math.round(p3End))}c`,startC:p2End,endC:p3End,items:findPhaseItems(Math.round(p1End),Math.round(p2End*2),5),desc:'High-value crafts, double corruptions, meta build item flipping'},{name:'Phase 4: Endgame',target:`${fmt(Math.round(p3End))}c to ${fmt(Math.round(p4End))}c (Mirror)`,startC:p3End,endC:p4End,items:findPhaseItems(Math.round(p2End),Math.round(p3End*2),5),desc:'Bulk flipping strategies, high-end crafts, final push'}];let currentPhase=0;if(startBudget>=p3End)currentPhase=3;else if(startBudget>=p2End)currentPhase=2;else if(startBudget>=p1End)currentPhase=1;const overallPct=Math.min(100,Math.round(startBudget/mirrorPrice*100*100)/100);let html=`<div class="z2m-overall-progress"><div class="z2m-overall-label">Progress to Mirror (${fmt(Math.round(mirrorPrice))}c)</div><div class="z2m-overall-val">${overallPct}% — ${fmt(Math.round(startBudget))}c / ${fmt(Math.round(mirrorPrice))}c</div><div class="z2m-progress" style="margin-top:8px"><div class="z2m-progress-fill" style="width:${overallPct}%"></div></div></div>`;phases.forEach((ph,i)=>{const isActive=i===currentPhase;const totalProfit=ph.items.reduce((s,it)=>s+it.profit,0);const phasePct=ph.endC>ph.startC?Math.min(100,Math.max(0,Math.round((startBudget-ph.startC)/(ph.endC-ph.startC)*100))):0;const phaseProgress=i<currentPhase?100:(i===currentPhase?Math.max(0,phasePct):0);const gap=ph.endC-Math.max(startBudget,ph.startC);const avgProfit=totalProfit>0?Math.round(totalProfit/ph.items.length):1;const cyclesNeeded=avgProfit>0?Math.ceil(Math.max(0,gap)/avgProfit):999;html+=`<div class="z2m-phase${isActive?' active-phase':''}"><div class="z2m-phase-header"><div><span class="z2m-phase-name">${ph.name}</span><span style="font-size:12px;color:var(--muted);margin-left:8px">${ph.desc}</span></div><span class="z2m-phase-target">${ph.target}</span></div><div class="z2m-progress"><div class="z2m-progress-fill" style="width:${phaseProgress}%"></div></div>`;if(ph.items.length>0){html+=ph.items.map(it=>`<div class="z2m-item"><div><span class="z2m-item-name">${esc(it.name)}</span><span class="z2m-item-detail" style="margin-left:8px">Buy at <span class="chaos-val">${fmt(it.buy)}c</span>, ${esc(it.action)}, sell for <span class="chaos-val">${fmt(it.sell)}c</span></span></div><span class="z2m-item-profit">+${fmt(it.profit)}c</span></div>`).join('');}else{html+='<div class="z2m-item"><span class="z2m-item-detail">No specific items found in this price range. Try manual trading or bulk strategies.</span></div>';}html+=`<div class="z2m-summary"><span>Start: <strong class="chaos-val">${fmt(Math.round(ph.startC))}c</strong></span><span>End: <strong class="chaos-val">${fmt(Math.round(ph.endC))}c</strong></span><span>Expected profit/cycle: <strong class="profit-positive">+${fmt(totalProfit)}c</strong></span><span>Est. cycles: <strong>${cyclesNeeded}</strong></span></div></div>`;});const remainingGap=Math.max(0,mirrorPrice-startBudget);const avgAllProfit=phases.reduce((s,p)=>s+p.items.reduce((s2,it)=>s2+it.profit,0),0);const totalCycles=avgAllProfit>0?Math.ceil(remainingGap/(avgAllProfit/4)):999;html+=`<div style="margin-top:1rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted)"><strong style="color:var(--accent)">Summary:</strong> You need <strong class="chaos-val">${fmt(Math.round(remainingGap))}c</strong> more to reach a Mirror. At an average of ~${fmt(Math.round(avgAllProfit/4))}c profit per cycle across all phases, you need roughly <strong>${totalCycles}</strong> more trade cycles. Good luck, Exile!</div>`;res.innerHTML=html;}
+function renderWhale(){const sf=document.getElementById('whaleStrategy').value;const tf=document.getElementById('whaleTag').value;const mc=parseFloat(document.getElementById('whaleMaxCost').value)||99999;const ml=parseInt(document.getElementById('whaleMaxList').value)||999;const co=document.getElementById('whaleCornerable').checked;const q=document.getElementById('whaleSearch').value.toLowerCase();const stratTags={corner:'flipping','6link_flip':'flipping',gem_level:'leveling',double_corrupt:'corruption',vaal_corrupt:'corruption',tainted_chaos_jewels:'corruption',harvest_fracture:'crafting',essence_craft:'crafting'};let items=WHALES.filter(w=>{if(sf!=='all'){if(!w.strategies.some(s=>s.id===sf))return false;}if(tf!=='all'){const matching=WHALE_STRATS.filter(s=>s.tag===tf).map(s=>s.id);if(!w.strategies.some(s=>matching.includes(s.id)))return false;}if(w.best_cost>mc)return false;if(w.listings>ml)return false;if(co&&w.corner_score<=0)return false;if(q&&!w.name.toLowerCase().includes(q))return false;return true;});const total=WHALES.length;const cornerable=WHALES.filter(w=>w.corner_score>0).length;const highP=items.filter(w=>w.best_profit>=500).length;document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Whale Targets</div><div class="stat-val">${total}</div></div><div class="stat-card"><div class="stat-label">Cornerable</div><div class="stat-val" style="color:var(--purple)">${cornerable}</div></div><div class="stat-card"><div class="stat-label">500c+ Profit</div><div class="stat-val" style="color:var(--green)">${highP}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('whaleGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No whale targets match filters</div>';return;}const stratColors={corner:'var(--purple)','6link_flip':'var(--green)',gem_level:'var(--blue)',double_corrupt:'var(--red)',vaal_corrupt:'var(--red)',tainted_chaos_jewels:'var(--orange)',harvest_fracture:'var(--green)',essence_craft:'var(--yellow)'};const stratNames={corner:'Corner Supply','6link_flip':'6-Link Flip',gem_level:'Gem Level',double_corrupt:'Double Corrupt',vaal_corrupt:'Vaal Corrupt',tainted_chaos_jewels:'Tainted Chaos',harvest_fracture:'Harvest Fracture',essence_craft:'Essence Craft'};g.innerHTML=items.slice(0,60).map(w=>{const badges=[];if(w.builds&&w.builds.length)w.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));const cornerHtml=w.corner_score>0?`<div style="display:flex;align-items:center;gap:6px;margin:6px 0"><span style="font-size:11px;color:var(--purple);font-weight:600">Corner Score: ${w.corner_score}/100</span><div style="width:80px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:${w.corner_score}%;background:var(--purple);border-radius:3px"></div></div></div>`:'';const stratPills=w.strategies.map(s=>`<span style="display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin:2px;background:${stratColors[s.id]||'var(--muted)'}20;color:${stratColors[s.id]||'var(--muted)'};border:1px solid ${stratColors[s.id]||'var(--muted)'}40">${stratNames[s.id]||s.id} +${fmt(s.profit)}c</span>`).join('');const listColor=w.listings<=3?'var(--red)':w.listings<=10?'var(--yellow)':'var(--muted)';const listWarn=w.listings<=5?'<span style="font-size:10px;color:var(--red);font-weight:600"> LOW SUPPLY</span>':'';const cf=w.confidence||95;const confHtml=cf<=50?`<div style="display:flex;align-items:center;gap:4px;margin:2px 0"><span style="font-size:10px;color:${confColor(cf)};font-weight:600">${confLabel(cf)} price</span><div class="conf-bar"><div class="conf-fill" style="width:${cf}%;background:${confColor(cf)}"></div></div></div>`:'';const reasonHtml=w.item_reason?`<div style="font-size:11px;color:var(--blue);margin-bottom:6px;padding:4px 8px;background:var(--blue)10;border-radius:4px;border-left:3px solid var(--blue)">${esc(w.item_reason)}</div>`:'';return `<div class="flip-card" style="border-color:${w.corner_score>50?'var(--purple)':'var(--border)'}"><div class="flip-header"><span class="flip-name">${esc(w.name)}${w.variant?` <span style="font-size:11px;color:var(--muted);font-weight:400">(${esc(w.variant)})</span>`:''}</span><span class="tier-badge" style="color:${w.tier_color};border-color:${w.tier_color}30;background:${w.tier_color}18">${esc(w.tier_label)}</span></div><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><span class="chaos-val" style="font-size:16px">${fmt(w.chaos)}c</span>${cf<=25?'<span style="font-size:10px;color:var(--red);font-weight:600" title="Very few listings on poe.ninja — price may not reflect actual market"> ⚠</span>':''}<span style="font-size:12px;color:${listColor};font-weight:600" title="Approximate count from poe.ninja — check trade site for real listings">~${w.listings} listed${listWarn}</span><span style="font-size:12px;color:var(--muted)">${TL[w.type]||w.type}</span>${badges.join('')}</div>${confHtml}${reasonHtml}${cornerHtml}<div style="margin:8px 0;padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)"><div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Best Strategy: ${stratNames[w.best_strategy]||w.best_strategy}</div><div style="font-size:12px;color:var(--text);line-height:1.5">${esc(w.best_detail)}</div><div style="display:flex;align-items:center;gap:12px;margin-top:6px"><span style="font-size:11px;color:var(--muted)">Cost: <span class="chaos-val">${fmt(w.best_cost)}c</span></span><span style="font-size:11px;color:var(--muted)">Expected: <span class="profit-${w.best_profit>=500?'high':'positive'}">+${fmt(w.best_profit)}c</span></span></div></div>${w.strategies.length>1?`<div style="margin-top:6px"><span style="font-size:10px;color:var(--muted)">Also viable:</span> ${stratPills}</div>`:''}<div style="margin-top:8px;display:flex;gap:6px;align-items:center"><a class="trade-link" href="${tradeUrlOfficial(w.name)}" target="_blank">Trade →</a><a class="trade-link-ninja" href="${tradeUrl(w.name,w.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('');}
+function renderGuide(){document.getElementById('stats').innerHTML='';document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('guideArea').innerHTML=`<div class="guide-wrap"><div class="guide-section"><div class="guide-summary"><strong>Tools &amp; Resources</strong> &mdash; Everything you need to make currency in PoE, all in one place.</div></div>${[['Essential Tools','<ul><li><strong>Awakened PoE Trade</strong> &mdash; in-game price checking overlay (Ctrl+D on items). Get it at: <a href="https://snosme.github.io/awakened-poe-trade" target="_blank" style="color:var(--blue)">snosme.github.io/awakened-poe-trade</a></li><li><strong>poe.ninja</strong> &mdash; real-time market data (you\'re looking at it). API-powered. <a href="https://poe.ninja" target="_blank" style="color:var(--blue)">poe.ninja</a></li><li><strong>Craft of Exile</strong> &mdash; simulate crafts before spending currency. <a href="https://craftofexile.com" target="_blank" style="color:var(--blue)">craftofexile.com</a></li><li><strong>Wealthy Exile</strong> &mdash; wealth tracking, chaos/hour, stash breakdowns. <a href="https://wealthyexile.com" target="_blank" style="color:var(--blue)">wealthyexile.com</a></li><li><strong>Exilence Next</strong> &mdash; net worth tracker, profit tracking per session.</li></ul>'],['Currency Making Methods','<ul><li><strong>Bulk Trading:</strong> Buy essences/scarabs/fossils cheap in small quantities, sell in bulk for 20-40% premium.</li><li><strong>Currency Flipping:</strong> Buy/sell same currency to different players. Use this dashboard\'s Currency tab to find spreads.</li><li><strong>Boss Farming:</strong> Farm specific bosses for guaranteed drops. Maven, Sirus, Uber Elder.</li><li><strong>Crafting Services:</strong> Use Craft of Exile to plan, offer services in trade chat.</li><li><strong>Vendor Recipes:</strong> Full rare set (ilvl 60-74) = 1 chaos. Unidentified = 2 chaos.</li><li><strong>Lab Running:</strong> Enchant popular helmets, sell for premium.</li><li><strong>Heist:</strong> Run grand heists for raw currency and unique drops.</li><li><strong>Div Card Investing:</strong> Buy incomplete sets below completion value.</li></ul>'],['Pro Tips','<ul><li>Always check poe.ninja 7-day trend before buying.</li><li>Use Awakened PoE Trade for instant in-game price checks.</li><li>Track your chaos/hour with Wealthy Exile or Exilence.</li><li>This dashboard works best when run morning + evening for alert coverage.</li><li>Start with the Budget Planner to get a focused plan before trading.</li></ul>'],['Price Tiers','<span class="guide-color" style="background:#888"></span>Under 1 div = base material. <span class="guide-color" style="background:#5b9bd5"></span>1-3 div = cheap targets. <span class="guide-color" style="background:#4CAF82"></span>3-6 div = mid profit zone. <span class="guide-color" style="background:#d4a017"></span>6-10 div = solid. <span class="guide-color" style="background:#e08833"></span>11-15 div = high value. <span class="guide-color" style="background:#e05555"></span>15+ div = chase items.'],['Meta Builds','<span class="badge badge-build">PC PF</span> Poisonous Concoction PF, <span class="badge badge-build">LA DE</span> Lightning Arrow DE, <span class="badge badge-build">GC Mine</span> Glacial Cascade Miner, <span class="badge badge-build">RF Chief</span> Righteous Fire Chief, <span class="badge badge-build">CWS Chief</span> CWS Chieftain, <span class="badge badge-build">Bleed Glad</span> Bleed Bow Glad. Items for these builds get blue badges and higher demand.'],['Alert Types','<ul><li><span class="badge-alert alert-spike">SPIKE</span> = +25% price increase.</li><li><span class="badge-alert alert-crash">CRASH</span> = -25% price drop.</li><li><span class="badge-alert alert-drying">DRYING</span> = listings dropping fast.</li><li><span class="badge-alert alert-flood">FLOOD</span> = listings surging.</li><li><span class="badge-alert alert-new">NEW</span> = new item appeared.</li><li><span class="badge-alert alert-underpriced">UNDERPRICED</span> = &gt;30% below median + high demand. Best buy signal.</li><li><span class="badge-alert alert-meta_spike">META SPIKE</span> = meta build item with rising price.</li><li><span class="badge-alert alert-corner_risk">CORNER RISK</span> = supply collapsed, possible market manipulation.</li></ul>'],['Workflow','1. Run script before session. 2. Check Alerts for changes. 3. Check Flip Finder for quick wins. 4. Check Currency tab for exchange profits. 5. Budget Planner for craft plan. 6. Use Zero to Mirror for long-term goals. 7. Click Trade links to buy. 8. Run again after session.']].map(([t,b])=>`<div class="guide-section"><div class="guide-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.guide-arrow').classList.toggle('open')"><h2>${t}</h2><span class="guide-arrow">&#9660;</span></div><div class="guide-body"><p>${b}</p></div></div>`).join('')}</div>`;}
+function renderTable(cols,items){document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>{const a=sortKey===c.key?(sortDir===-1?' \u2193':' \u2191'):'';return `<th class="${sortKey===c.key?'sorted':''}" onclick="setSort('${c.key}')">${c.label}${a}</th>`;}).join('')+'</tr>';if(!items.length){document.getElementById('tbody').innerHTML=`<tr><td colspan="${cols.length}" class="empty">No items match</td></tr>`;return;}document.getElementById('tbody').innerHTML=items.slice(0,200).map(r=>'<tr>'+cols.map(c=>`<td>${fmtCell(c.fmt,r[c.key],r)}</td>`).join('')+'</tr>').join('');}
 function setSort(k){if(k==='_t')return;if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=-1;}render();}
 if(DATA.some(d=>d.alert))document.getElementById('alertDot').style.display='inline-block';
-toggleHint('economy');
-buildTabs();render();
+toggleHint('economy');buildTabs();render();
 </script></body></html>
 """
 
