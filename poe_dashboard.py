@@ -36,102 +36,93 @@ ITEM_TYPES = [
     ("UniqueFlask",     "Unique Flasks"),
     ("SkillGem",        "Skill Gems"),
     ("BaseType",        "Base Types"),
+    ("DivinationCard",  "Divination Cards"),
 ]
 
+# 3.28 Mirage league meta builds (updated March 2026 from poe.ninja/maxroll/mobalytics)
 META_BUILDS = {
-    "Poisonous Concoction Pathfinder": {
-        "abbr": "PC PF",
-        "armours": ["dendrobate", "cherrubim", "carcass jack", "atziri's step",
-                     "the embalmer", "darkray vectors", "rat's nest"],
+    "Kinetic Fusillade Hierophant": {
+        "abbr": "KF Hiero",
+        "armours": ["aegis aurora", "doedre's tenure"],
         "weapons": [],
-        "accessories": ["mark of the elder", "circle of nostalgia", "aul's uprising",
-                        "impresence", "atziri's foible"],
-        "flasks": ["dying sun", "atziri's promise", "taste of hate",
-                   "bottled faith", "the writhing jar"],
-        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel",
-                   "forbidden flame", "forbidden flesh", "unnatural instinct"],
-        "gems": ["poisonous concoction", "plague bearer", "herald of agony",
-                 "malevolence", "determination", "grace", "vaal grace"],
+        "accessories": ["timeclasp", "warped timepiece", "defiance of destiny"],
+        "flasks": ["bottled faith", "dying sun"],
+        "jewels": ["rain of splinters", "watcher's eye", "large cluster jewel"],
+        "gems": ["kinetic fusillade", "ballista totem support", "less duration support",
+                 "faster attacks support", "determination", "grace"],
     },
-    "Lightning Arrow Deadeye": {
+    "GC Fissure Elementalist": {
+        "abbr": "GC Elem",
+        "armours": ["shavronne's wrappings", "cloak of defiance"],
+        "weapons": ["arkhon's tools"],
+        "accessories": ["winterweave", "presence of chayula"],
+        "flasks": ["bottled faith", "atziri's promise", "dying sun"],
+        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel"],
+        "gems": ["glacial cascade of the fissure", "high-impact mine support",
+                 "trap and mine damage", "hypothermia", "zealotry", "determination"],
+    },
+    "PC Bouncing Pathfinder": {
+        "abbr": "PC PF",
+        "armours": ["dendrobate", "snakebite", "the embalmer",
+                     "asenath's gentle touch"],
+        "weapons": [],
+        "accessories": ["fury valve", "circle of nostalgia", "atziri's foible"],
+        "flasks": ["dying sun", "atziri's promise", "taste of hate"],
+        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel"],
+        "gems": ["poisonous concoction of bouncing", "plague bearer",
+                 "malevolence", "determination", "grace"],
+    },
+    "LA Ele Hit Deadeye": {
         "abbr": "LA DE",
-        "armours": ["hyrri's ire", "queen of the forest", "hyrri's demise",
-                     "atziri's step", "darkray vectors", "rat's nest",
-                     "starkonja's head", "farrul's fur"],
-        "weapons": ["windripper", "deaths opus", "death's opus", "doomfletch's prism",
-                     "voltaxic rift", "the tempest"],
-        "accessories": ["rigwald's quills", "hyrri's truth", "hyrri's bite",
-                        "mark of the elder", "aul's uprising", "badge of the brotherhood"],
-        "flasks": ["dying sun", "taste of hate", "bottled faith",
-                   "atziri's promise", "the wise oak"],
-        "jewels": ["watcher's eye", "inspired learning", "unnatural instinct",
-                   "forbidden flame", "forbidden flesh", "large cluster jewel"],
-        "gems": ["lightning arrow", "barrage", "wrath", "grace",
-                 "determination", "herald of ice", "mark of the elder"],
+        "armours": ["hyrri's ire", "queen of the forest", "farrul's fur"],
+        "weapons": ["windripper", "death's opus"],
+        "accessories": ["prismweave", "the taming", "rigwald's quills"],
+        "flasks": ["dying sun", "taste of hate", "bottled faith"],
+        "jewels": ["lethal pride", "watcher's eye", "large cluster jewel"],
+        "gems": ["lightning arrow", "elemental hit of the spectrum",
+                 "trinity support", "mirage archer", "anger", "grace"],
     },
-    "Glacial Cascade Miner": {
-        "abbr": "GC Mine",
-        "armours": ["tremor rod", "cloak of defiance", "indigon",
-                     "atziri's step", "kaom's heart", "carcass jack"],
-        "weapons": ["tremor rod", "void battery", "pledge of hands"],
-        "accessories": ["atziri's foible", "mark of the shaper",
-                        "badge of the brotherhood", "aul's uprising",
-                        "presence of chayula"],
-        "flasks": ["bottled faith", "atziri's promise", "dying sun",
-                   "cinderswallow urn", "taste of hate"],
-        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel",
-                   "forbidden flame", "forbidden flesh", "unnatural instinct"],
-        "gems": ["glacial cascade", "high-impact mine support", "trap and mine damage support",
-                 "zealotry", "determination", "clarity"],
+    "Blight Contagion Trickster": {
+        "abbr": "Blight",
+        "armours": [],
+        "weapons": ["cane of unravelling", "cane of kulamak"],
+        "accessories": [],
+        "flasks": ["atziri's promise"],
+        "jewels": ["watcher's eye"],
+        "gems": ["blight of contagion", "contagion", "void manipulation",
+                 "infused channelling", "bane", "despair", "malevolence"],
     },
-    "Righteous Fire Chieftain": {
-        "abbr": "RF Chief",
-        "armours": ["rise of the phoenix", "saffell's frame",
-                     "kaom's heart", "legacy of fury", "aegis aurora",
-                     "the brass dome", "dawnbreaker"],
-        "weapons": ["searing touch"],
-        "accessories": ["pyre", "leadership's price", "atziri's foible",
-                        "aul's uprising", "presence of chayula"],
-        "flasks": ["bottled faith", "dying sun", "ruby flask",
-                   "taste of hate", "atziri's promise"],
-        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel",
-                   "forbidden flame", "forbidden flesh", "unnatural instinct",
-                   "sublime vision"],
-        "gems": ["righteous fire", "fire trap", "determination",
-                 "purity of fire", "purity of elements", "malevolence",
+    "CWS RF Chieftain": {
+        "abbr": "CWS RF",
+        "armours": ["cloak of flame", "maw of conquest", "rise of the phoenix"],
+        "weapons": ["razor of the seventh sun"],
+        "accessories": ["valyrium", "defiance of destiny", "immortal flesh"],
+        "flasks": ["bottled faith", "dying sun", "ruby flask"],
+        "jewels": ["bloodnotch", "watcher's eye", "large cluster jewel"],
+        "gems": ["righteous fire", "cast when stunned support", "detonate dead",
+                 "purifying flame", "determination", "purity of fire",
                  "vaal righteous fire"],
     },
-    "CWS Chieftain": {
-        "abbr": "CWS Chief",
-        "armours": ["kaom's heart", "carcass jack", "the brass dome",
-                     "aegis aurora", "legacy of fury", "dawnbreaker"],
-        "weapons": ["mjolner", "cospri's malice"],
-        "accessories": ["aul's uprising", "atziri's foible",
-                        "presence of chayula", "leadership's price",
-                        "mageblood"],
-        "flasks": ["bottled faith", "dying sun", "atziri's promise",
-                   "taste of hate"],
-        "jewels": ["watcher's eye", "forbidden flame", "forbidden flesh",
-                   "large cluster jewel", "unnatural instinct", "sublime vision"],
-        "gems": ["cast when stunned support", "determination", "molten shell",
-                 "purity of elements", "defiance banner"],
+    "Absolution Guardian": {
+        "abbr": "Absol",
+        "armours": ["aegis aurora"],
+        "weapons": [],
+        "accessories": ["atziri's foible"],
+        "flasks": ["bottled faith"],
+        "jewels": ["watcher's eye"],
+        "gems": ["absolution", "minion damage support", "predator",
+                 "melee splash", "determination", "grace"],
     },
-    "Bleed Bow Gladiator": {
-        "abbr": "Bleed Glad",
-        "armours": ["lioneye's vision", "assailum", "haemophilia",
-                     "atziri's step", "belly of the beast", "farrul's fur",
-                     "hyrri's ire", "drillneck"],
-        "weapons": ["lioneye's glare", "chin sol", "reach of the council",
-                     "the crimson storm"],
-        "accessories": ["ryslatha's coil", "rigwald's quills",
-                        "mark of the elder", "aul's uprising",
-                        "vulnerability on hit ring"],
-        "flasks": ["lion's roar", "taste of hate", "atziri's promise",
-                   "dying sun", "bottled faith"],
-        "jewels": ["watcher's eye", "large cluster jewel", "medium cluster jewel",
-                   "forbidden flame", "forbidden flesh", "unnatural instinct"],
-        "gems": ["puncture", "split arrow", "ensnaring arrow",
-                 "pride", "determination", "malevolence", "blood and sand"],
+    "EoW Mines Inquisitor": {
+        "abbr": "EoW Inq",
+        "armours": [],
+        "weapons": [],
+        "accessories": ["presence of chayula"],
+        "flasks": ["bottled faith", "atziri's promise"],
+        "jewels": ["watcher's eye", "large cluster jewel"],
+        "gems": ["eye of winter", "high-impact mine support",
+                 "trap and mine damage", "inspiration", "hypothermia",
+                 "zealotry", "determination"],
     },
 }
 
@@ -139,6 +130,7 @@ TRADE_CATEGORIES = {
     "UniqueArmour": "unique-armours", "UniqueWeapon": "unique-weapons",
     "UniqueJewel": "unique-jewels", "UniqueAccessory": "unique-accessories",
     "UniqueFlask": "unique-flasks", "SkillGem": "skill-gems", "BaseType": "base-types",
+    "DivinationCard": "divination-cards",
 }
 
 
@@ -865,6 +857,145 @@ def find_flips(all_rows):
         seen.add(key)
         result.append(f)
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FOULBORN 6L FLIP TRACKER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def find_foulborn_flips(all_rows):
+    """Find profitable Foulborn 0L→6L flips (this league's main money-maker).
+    Foulborn items are Mirage league-specific variants with wider 6L spreads."""
+    flips = []
+    by_name = {}
+    for r in all_rows:
+        if "foulborn" in r["name"].lower():
+            by_name.setdefault(r["name"], []).append(r)
+
+    link_cost = CRAFT_COSTS_CHAOS.get("6-link", 378)
+
+    for name, variants in by_name.items():
+        if not any(v["type"] in ("UniqueArmour", "UniqueWeapon") for v in variants):
+            continue
+        unlinked = [v for v in variants if v["links"] < 6 and v["chaos"] > 0]
+        linked = [v for v in variants if v["links"] >= 6 and v["chaos"] > 0]
+        if not unlinked or not linked:
+            continue
+        buy = min(unlinked, key=lambda v: v["chaos"])
+        sell = max(linked, key=lambda v: v["chaos"])
+        if buy["listings"] < 2 or sell["listings"] < 2:
+            continue
+        profit = sell["chaos"] - buy["chaos"] - link_cost
+        if profit <= 0:
+            continue
+        roi = round(profit / (buy["chaos"] + link_cost) * 100, 1)
+        # Stress test: would it survive a 15% price drop?
+        stressed_profit = round(sell["chaos"] * 0.85 - buy["chaos"] - link_cost)
+        risk = "low" if stressed_profit > 0 else ("medium" if profit > 100 else "high")
+        flips.append({
+            "name": name,
+            "variant": buy.get("variant", ""),
+            "buy_price": buy["chaos"],
+            "sell_price": sell["chaos"],
+            "buy_listings": buy["listings"],
+            "sell_listings": sell["listings"],
+            "link_cost": link_cost,
+            "profit": profit,
+            "roi": roi,
+            "stressed_profit": stressed_profit,
+            "risk": risk,
+            "builds": buy.get("builds", []) or sell.get("builds", []),
+        })
+
+    flips.sort(key=lambda f: f["profit"], reverse=True)
+    return flips
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DIVINATION CARD SET COMPLETION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_div_cards():
+    """Fetch divination card data and find profitable set completions."""
+    url = f"https://poe.ninja/api/data/itemoverview?league={LEAGUE}&type=DivinationCard"
+    print("  Fetching divination cards...")
+    req = urllib.request.Request(url, headers={"User-Agent": "poe-dashboard/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        return data.get("lines", [])
+    except Exception as e:
+        print(f"  !! Failed to fetch div cards: {e}")
+        return []
+
+
+def find_div_card_flips(div_cards):
+    """Find div card sets where buying a full set costs less than the reward.
+
+    poe.ninja provides:
+      - chaosValue: price of ONE card
+      - stackSize: cards needed for full set
+      - explicitModifiers[0].text: the reward description
+      - links to the reward item (via name matching)
+
+    We look for sets where: card_price × stack_size < reward_value × 0.85
+    (15% margin for selling the reward)
+    """
+    flips = []
+    for card in div_cards:
+        name = card.get("name", "")
+        card_price = round(card.get("chaosValue", 0))
+        stack_size = card.get("stackSize", 1) or 1
+        listings = card.get("listingCount", 0)
+        mods = card.get("explicitModifiers", []) or []
+        reward_text = mods[0].get("text", "") if mods else ""
+
+        if card_price < 1 or listings < 5:
+            continue
+
+        set_cost = card_price * stack_size
+
+        # poe.ninja provides artText or implicitModifiers for reward value
+        # but the most reliable indicator is the "pay" ratio embedded in the
+        # item data — some cards have a chaosEquivalent for the reward
+        # We approximate by looking at high-value cards (>50c) and checking
+        # if the reward item is in our PRICE_LOOKUP
+        reward_name = ""
+        # Try to extract reward item name from the reward text
+        # Common patterns: "Shavronne's Wrappings", "{item_name}"
+        for lookup_name in PRICE_LOOKUP:
+            if lookup_name.lower() in reward_text.lower():
+                reward_name = lookup_name
+                break
+
+        if reward_name:
+            # Find the best (highest price) variant of the reward
+            entries = PRICE_LOOKUP.get(reward_name, [])
+            if entries:
+                best_reward = max(entries, key=lambda e: e["chaos"])
+                reward_value = best_reward["chaos"]
+                reward_listings = best_reward["listings"]
+                if reward_value > set_cost and reward_listings >= 2:
+                    profit = round(reward_value * 0.85 - set_cost)  # 15% sell friction
+                    if profit > 10:
+                        roi = round(profit / set_cost * 100, 1)
+                        flips.append({
+                            "card_name": name,
+                            "card_price": card_price,
+                            "stack_size": stack_size,
+                            "set_cost": set_cost,
+                            "reward_name": reward_name,
+                            "reward_value": reward_value,
+                            "reward_listings": reward_listings,
+                            "card_listings": listings,
+                            "profit": profit,
+                            "roi": roi,
+                            "reward_text": reward_text[:80],
+                        })
+
+    flips.sort(key=lambda f: f["profit"], reverse=True)
+    # Cap at top 30 to keep data manageable
+    return flips[:30]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1602,9 +1733,10 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 const SERVE_MODE=SERVE_MODE_FLAG;
 function doRefresh(){if(SERVE_MODE){const btn=document.getElementById('refreshBtn');btn.textContent='Refreshing...';btn.style.color='var(--accent)';btn.disabled=true;fetch('/refresh').then(r=>{if(r.ok){btn.textContent='Done! Reloading...';setTimeout(()=>location.reload(),500);}else{btn.textContent='Error — retry';btn.disabled=false;}}).catch(()=>{btn.textContent='Error — retry';btn.disabled=false;btn.style.color='var(--red)';});}else{document.getElementById('refreshModal').classList.add('show');}}
 const DATA=ALL_DATA_JSON,FLIPS=ALL_FLIPS_JSON,DIV_RATIO=DIV_RATIO_NUM,LEAGUE='LEAGUE_NAME';
+const FOULBORN=ALL_FOULBORN_JSON;const DIVCARDS=ALL_DIVCARD_JSON;
 const CURRENCIES=ALL_CURRENCY_JSON;const ARB_LOOPS=ALL_ARB_JSON;const WHALES=ALL_WHALE_JSON;const WHALE_STRATS=ALL_STRATS_JSON;const MIRROR_PRICE=MIRROR_PRICE_NUM;const HISTORY=ALL_HISTORY_JSON;
 let mode='economy';let proMode=false;const MODES=['economy','craft','suggest','flip','budget','alerts','currency','z2m','whale','guide'];
-const TL={UniqueArmour:'Armours',UniqueWeapon:'Weapons',UniqueJewel:'Jewels',UniqueAccessory:'Accessories',UniqueFlask:'Flasks',SkillGem:'Gems',BaseType:'Bases'};
+const TL={UniqueArmour:'Armours',UniqueWeapon:'Weapons',UniqueJewel:'Jewels',UniqueAccessory:'Accessories',UniqueFlask:'Flasks',SkillGem:'Gems',BaseType:'Bases',DivinationCard:'Div Cards'};
 const ML={'6-link':'6-Link','corrupt':'Corrupt','double_corrupt':'Dbl Corrupt','harvest':'Harvest','fracture':'Fracture','essence':'Essence'};
 const TYPES=[...new Set(DATA.map(d=>d.type))];let activeType=TYPES[0],sortKey='chaos',sortDir=-1;
 function setProMode(v){proMode=v;const btns=document.querySelectorAll('.pro-toggle-btn');btns[0].classList.toggle('active',!v);btns[1].classList.toggle('active',v);render();}
@@ -1634,7 +1766,12 @@ function render(){({economy:renderEconomy,craft:renderCraft,suggest:renderSugges
 function renderEconomy(){buildTabs();const mc=parseFloat(document.getElementById('minChaos').value)||0,ml=parseInt(document.getElementById('maxListings').value)||99999,sl=document.getElementById('sixLink').checked,ho=document.getElementById('hotOnly').checked,up=document.getElementById('underpricedOnly').checked,q=document.getElementById('search').value.toLowerCase();let items=DATA.filter(d=>d.type===activeType).filter(d=>{if(d.chaos<mc)return false;if(d.listings>ml)return false;if(sl&&d.links<6)return false;if(ho&&d.score<60)return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*av.localeCompare(bv);return sortDir*((bv||0)-(av||0));});const all=DATA.filter(d=>d.type===activeType);document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total</div><div class="stat-val">${all.length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${all.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Hot (60+)</div><div class="stat-val">${all.filter(d=>d.score>=60).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;const cols=getCols();renderTable(cols[activeType]||cols.default,items);}
 function renderCraft(){const mf=document.getElementById('craftMethod').value,tf=document.getElementById('craftTier').value,mp=parseFloat(document.getElementById('minProfit').value)||0,mo=document.getElementById('metaOnly').checked,q=document.getElementById('craftSearch').value.toLowerCase();let items=DATA.filter(d=>d.craft_method).filter(d=>{if(mf!=='all'&&d.craft_method!==mf)return false;if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.craft_profit<mp)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(typeof av==='string')return sortDir*(av||'').localeCompare(bv||'');return sortDir*((bv||0)-(av||0));});const cr=DATA.filter(d=>d.craft_method);document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Craftable</div><div class="stat-val">${cr.length}</div></div><div class="stat-card"><div class="stat-label">Meta</div><div class="stat-val">${cr.filter(d=>d.builds&&d.builds.length).length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${cr.filter(d=>d.craft_profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;renderTable(getCC(),items);}
 function renderSuggest(){const tf=document.getElementById('suggestTier').value,md=parseInt(document.getElementById('suggestMinDemand').value)||0,mo=document.getElementById('suggestMeta').checked,up=document.getElementById('suggestUnderpriced').checked,q=document.getElementById('suggestSearch').value.toLowerCase();let items=DATA.filter(d=>d.top3&&d.top3.length>0&&d.top3[0].profit>0).filter(d=>{if(tf!=='all'&&d.tier_idx!==parseInt(tf))return false;if(d.demand<md)return false;if(mo&&(!d.builds||!d.builds.length))return false;if(up&&!d.underpriced)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>(b.top3[0].profit||0)-(a.top3[0].profit||0));document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">2+ options</div><div class="stat-val">${items.filter(d=>d.top3.length>=2).length}</div></div><div class="stat-card"><div class="stat-label">High demand</div><div class="stat-val" style="color:var(--red)">${items.filter(d=>d.demand>=60).length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${items.filter(d=>d.underpriced>0).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('suggestGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No items match</div>';return;}g.innerHTML=items.slice(0,80).map(r=>{const badges=[];if(proMode){if(r.builds&&r.builds.length)r.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));if(r.links>=6)badges.push('<span class="badge badge-6l">6L</span>');if(r.underpriced>0)badges.push(`<span class="badge badge-underpriced">${r.underpriced}%</span>`);}const showOpts=proMode?r.top3:r.top3.slice(0,1);if(!proMode){const o=showOpts[0];return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta">${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options"><div class="suggest-option best"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span></div><span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span></div></div></div></div>`;}const opts=showOpts.map((o,i)=>{const profitHtml=o.profit>0?`<span class="${o.profit>=500?'profit-high':'profit-positive'}">${fmt(o.profit)}c</span>`:`<span style="color:var(--red)">-EV</span>`;return `<div class="suggest-option${i===0?' best':''}"><div class="suggest-option-header"><div style="display:flex;align-items:center;gap:8px"><span class="suggest-option-num opt-${i+1}">${i+1}</span><span class="craft-method-badge method-${o.method}">${ML[o.method]||o.method}</span><span class="suggest-option-action">${esc(o.action)}</span>${i===0?'<span class="best-label">BEST</span>':''}</div>${profitHtml}</div><div class="suggest-option-reason">${esc(o.reason)}</div><div class="suggest-option-footer"><span class="risk-${o.risk||'low'}">Risk: ${(o.risk||'low').toUpperCase()}</span></div></div>`;}).join('');return `<div class="suggest-card"><div class="suggest-header"><span class="suggest-name">${esc(r.name)}</span><span class="chaos-val">${fmt(r.chaos)}c</span></div><div class="suggest-meta"><span class="tier-badge" style="color:${r.tier_color};border-color:${r.tier_color}30;background:${r.tier_color}18">${esc(r.tier_label)}</span><span style="font-size:12px;color:var(--muted)">${TL[r.type]||r.type}</span>${sparkSvg(r.spark)}${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(r.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(r.name,r.trade_cat)}" target="_blank">ninja</a></div></div><div class="suggest-options">${opts}</div></div>`;}).join('');}
-function renderFlip(){const ft=document.getElementById('flipType').value,mp=parseFloat(document.getElementById('flipMinProfit').value)||0,mo=document.getElementById('flipMetaOnly').checked,q=document.getElementById('flipSearch').value.toLowerCase();let items=FLIPS.filter(f=>{if(ft!=='all'&&f.flip_type!==ft)return false;if(f.profit<mp)return false;if(mo&&(!f.builds||!f.builds.length))return false;if(q&&!f.name.toLowerCase().includes(q))return false;return true;});document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total flips</div><div class="stat-val">${FLIPS.length}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${FLIPS.filter(f=>f.profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">6-Link arb</div><div class="stat-val">${FLIPS.filter(f=>f.flip_type==='6-Link Spread').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('flipGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No flips match</div>';return;}const fc={'6-Link Spread':'flip-6link','Gem Level Gap':'flip-gem','Price Gap':'flip-price'};g.innerHTML=items.slice(0,80).map(f=>{if(!proMode){return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}const badges=[];if(f.builds&&f.builds.length)f.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}).join('');}
+function renderFlip(){const ft=document.getElementById('flipType').value,mp=parseFloat(document.getElementById('flipMinProfit').value)||0,mo=document.getElementById('flipMetaOnly').checked,q=document.getElementById('flipSearch').value.toLowerCase();let items=FLIPS.filter(f=>{if(ft!=='all'&&f.flip_type!==ft)return false;if(f.profit<mp)return false;if(mo&&(!f.builds||!f.builds.length))return false;if(q&&!f.name.toLowerCase().includes(q))return false;return true;});document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Total flips</div><div class="stat-val">${FLIPS.length}</div></div><div class="stat-card"><div class="stat-label">Foulborn 6L</div><div class="stat-val" style="color:var(--purple)">${FOULBORN?FOULBORN.length:0}</div></div><div class="stat-card"><div class="stat-label">Div Card Sets</div><div class="stat-val" style="color:var(--accent)">${DIVCARDS?DIVCARDS.length:0}</div></div><div class="stat-card"><div class="stat-label">500c+ profit</div><div class="stat-val" style="color:var(--green)">${FLIPS.filter(f=>f.profit>=500).length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('flipGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No flips match</div>';return;}const fc={'6-Link Spread':'flip-6link','Gem Level Gap':'flip-gem','Price Gap':'flip-price'};g.innerHTML=items.slice(0,80).map(f=>{if(!proMode){return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div></div><span class="flip-arrow">&#8594;</span><div class="flip-box"><div class="flip-box-label">Sell</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-footer"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}const badges=[];if(f.builds&&f.builds.length)f.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(f.name)}</span><span class="flip-type-badge ${fc[f.flip_type]||'flip-price'}">${f.flip_type}</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy (${esc(f.buy_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.buy_listings} listed</div></div><span class="flip-arrow">&#8594;</span>${f.cost>0?`<div class="flip-box"><div class="flip-box-label">Craft</div><div class="flip-box-val" style="color:var(--muted)">${fmt(f.cost)}c</div></div><span class="flip-arrow">&#8594;</span>`:''}<div class="flip-box"><div class="flip-box-label">Sell (${esc(f.sell_variant)})</div><div class="flip-box-val chaos-val">${fmt(f.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${f.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(f.profit)}c</div></div></div><div class="flip-reason">${esc(f.reason)}</div><div class="flip-footer"><span class="risk-${f.risk||'low'}">Risk: ${(f.risk||'low').toUpperCase()}</span><span>Demand: ${f.demand||0}</span>${badges.join('')}<div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(f.name)}" target="_blank">Trade &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(f.name,f.trade_cat)}" target="_blank">ninja</a></div></div></div>`;}).join('');
+  /* Foulborn 6L Flips section */
+  if(FOULBORN&&FOULBORN.length>0){let fbHtml='<div style="grid-column:1/-1;margin-top:1rem"><h3 style="color:var(--purple);font-size:15px;margin-bottom:10px">⚡ Foulborn 6-Link Flips (League Mechanic)</h3></div>';fbHtml+=FOULBORN.filter(fb=>{if(q&&!fb.name.toLowerCase().includes(q))return false;if(mp&&fb.profit<mp)return false;return true;}).slice(0,20).map(fb=>{const riskCol=fb.risk==='low'?'var(--green)':fb.risk==='medium'?'var(--yellow)':'var(--red)';const badges=fb.builds&&fb.builds.length?fb.builds.map(b=>`<span class="badge badge-build">${esc(b)}</span>`).join(''):'';return `<div class="flip-card" style="border-color:var(--purple)"><div class="flip-header"><span class="flip-name">${esc(fb.name)}</span><span class="flip-type-badge" style="background:#2a1a3d;color:var(--purple);border:1px solid #4a2d6b">Foulborn 6L</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy 0L</div><div class="flip-box-val chaos-val">${fmt(fb.buy_price)}c</div><div style="font-size:10px;color:var(--muted)">${fb.buy_listings} listed</div></div><span class="flip-arrow">→</span><div class="flip-box"><div class="flip-box-label">Link Cost</div><div class="flip-box-val" style="color:var(--muted)">${fmt(fb.link_cost)}c</div></div><span class="flip-arrow">→</span><div class="flip-box"><div class="flip-box-label">Sell 6L</div><div class="flip-box-val chaos-val">${fmt(fb.sell_price)}c</div><div style="font-size:10px;color:var(--muted)">${fb.sell_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(fb.profit)}c</div></div></div><div style="display:flex;gap:12px;align-items:center;margin-top:6px;font-size:11px;flex-wrap:wrap"><span style="color:${riskCol};font-weight:600">Risk: ${fb.risk.toUpperCase()}</span><span style="color:var(--muted)">ROI: ${fb.roi}%</span><span style="color:var(--muted)">Stressed profit (if -15%): ${fb.stressed_profit}c</span>${badges}</div><div style="margin-top:6px"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(fb.name)}" target="_blank">Trade →</a><a class="trade-link-ninja" href="${tradeUrl(fb.name,'unique-armours')}" target="_blank">ninja</a></div></div></div>`;}).join('');g.innerHTML+=fbHtml;}
+  /* Div Card Set Flips section */
+  if(DIVCARDS&&DIVCARDS.length>0){let dcHtml='<div style="grid-column:1/-1;margin-top:1rem"><h3 style="color:var(--accent);font-size:15px;margin-bottom:10px">🃏 Div Card Set Completion Flips</h3></div>';dcHtml+=DIVCARDS.filter(dc=>{if(q&&!dc.card_name.toLowerCase().includes(q)&&!dc.reward_name.toLowerCase().includes(q))return false;if(mp&&dc.profit<mp)return false;return true;}).slice(0,20).map(dc=>`<div class="flip-card"><div class="flip-header"><span class="flip-name">${esc(dc.card_name)}</span><span class="flip-type-badge" style="background:#3d2a08;color:var(--accent);border:1px solid #6b4a12">Div Card</span></div><div class="flip-flow"><div class="flip-box"><div class="flip-box-label">Buy ${dc.stack_size}x</div><div class="flip-box-val chaos-val">${fmt(dc.set_cost)}c</div><div style="font-size:10px;color:var(--muted)">${dc.card_price}c each × ${dc.stack_size}</div></div><span class="flip-arrow">→</span><div class="flip-box"><div class="flip-box-label">Turn In</div><div class="flip-box-val" style="color:var(--muted)">→</div></div><span class="flip-arrow">→</span><div class="flip-box"><div class="flip-box-label">${esc(dc.reward_name)}</div><div class="flip-box-val chaos-val">${fmt(dc.reward_value)}c</div><div style="font-size:10px;color:var(--muted)">${dc.reward_listings} listed</div></div><span class="flip-arrow">=</span><div class="flip-box flip-profit-box"><div class="flip-box-label">Profit</div><div class="flip-box-val">+${fmt(dc.profit)}c</div></div></div><div style="font-size:11px;color:var(--muted);margin-top:4px">ROI: ${dc.roi}% | Card listings: ${dc.card_listings} | ${esc(dc.reward_text)}</div><div style="margin-top:6px"><div class="trade-links"><a class="trade-link" href="${tradeUrlOfficial(dc.card_name)}" target="_blank">Buy Cards →</a><a class="trade-link-ninja" href="${tradeUrl(dc.card_name,'divination-cards')}" target="_blank">ninja</a></div></div></div>`).join('');g.innerHTML+=dcHtml;}
+}
 function renderBudget(){document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';const a=document.getElementById('budgetArea');if(!a.innerHTML)a.innerHTML=`<div class="budget-input-row"><label>My budget:</label><input type="number" id="budgetAmt" value="2000" min="50" step="100" style="font-size:18px;width:120px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcBudget()">Calculate Plan</button><div class="control-group" style="margin-left:12px"><label class="checkbox"><input type="checkbox" id="budgetMeta"> Meta only</label></div></div><div id="budgetResults"></div>`;}
 function calcBudget(){const budget=parseFloat(document.getElementById('budgetAmt').value)||2000,mo=document.getElementById('budgetMeta').checked;const cc={'6-link':${0},'corrupt':${0},'double_corrupt':${0},'harvest':${0},'fracture':${0},'essence':${0}};let cands=DATA.filter(d=>d.craft_profit>0&&d.chaos>0&&d.chaos<=budget);if(mo)cands=cands.filter(d=>d.builds&&d.builds.length);cands=cands.map(d=>{const c=cc[d.craft_method]||100;const tc=d.chaos+c;return{...d,total_cost:tc,roi:d.craft_profit/tc};}).filter(d=>d.total_cost<=budget);cands.sort((a,b)=>b.roi-a.roi);let rem=budget,plan=[],tp=0,ts=0;const used=new Set();for(const c of cands){if(rem<c.total_cost)continue;const k=c.name+'|'+c.type;if(used.has(k))continue;used.add(k);rem=Math.round(rem-c.total_cost);tp+=c.craft_profit;ts+=c.total_cost;plan.push(c);if(plan.length>=15)break;}const roi=ts>0?Math.round(tp/ts*100):0;const r=document.getElementById('budgetResults');if(!plan.length){r.innerHTML='<div class="empty">No profitable crafts found. Try increasing budget.</div>';return;}r.innerHTML=`<div class="budget-summary"><div class="budget-summary-item"><div class="budget-summary-label">Budget</div><div class="budget-summary-val">${fmt(budget)}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Spent</div><div class="budget-summary-val">${fmt(Math.round(ts))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">Profit</div><div class="budget-summary-val" style="color:var(--green)">+${fmt(Math.round(tp))}c</div></div><div class="budget-summary-item"><div class="budget-summary-label">ROI</div><div class="budget-summary-val">${roi}%</div></div><div class="budget-summary-item"><div class="budget-summary-label">Left</div><div class="budget-summary-val" style="color:var(--muted)">${fmt(rem)}c</div></div></div><div class="budget-plan" style="margin-top:14px">${plan.map((p,i)=>{const bg=[];if(p.builds&&p.builds.length)p.builds.forEach(b=>bg.push(`<span class="badge badge-build">${esc(b)}</span>`));return `<div class="budget-item"><div class="budget-item-left"><span class="budget-step">${i+1}</span><span class="budget-item-name">${esc(p.name)}</span><span class="craft-method-badge method-${p.craft_method}">${ML[p.craft_method]||p.craft_method}</span>${bg.join('')}</div><div class="budget-item-right"><span style="font-size:12px;color:var(--muted)">Buy: <span class="chaos-val">${fmt(p.chaos)}c</span></span><span style="font-size:12px;color:var(--muted)">${esc(p.craft_action)}</span><span class="profit-positive">+${fmt(p.craft_profit)}c</span><a class="trade-link" href="${tradeUrlOfficial(p.name)}" target="_blank">Buy &#10148;</a><a class="trade-link-ninja" href="${tradeUrl(p.name,p.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('')}</div>`;}
 function renderAlerts(){const af=document.getElementById('alertType').value,q=document.getElementById('alertSearch').value.toLowerCase();let items=DATA.filter(d=>d.alert).filter(d=>{if(af!=='all'&&d.alert!==af)return false;if(q&&!d.name.toLowerCase().includes(q))return false;return true;});items.sort((a,b)=>Math.abs(b.price_change||0)-Math.abs(a.price_change||0));const aa=DATA.filter(d=>d.alert);document.getElementById('alertDot').style.display=aa.length?'inline-block':'none';document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Alerts</div><div class="stat-val" style="color:var(--red)">${aa.length}</div></div><div class="stat-card"><div class="stat-label">Spikes</div><div class="stat-val" style="color:var(--red)">${aa.filter(d=>d.alert==='spike').length}</div></div><div class="stat-card"><div class="stat-label">Crashes</div><div class="stat-val" style="color:var(--blue)">${aa.filter(d=>d.alert==='crash').length}</div></div><div class="stat-card"><div class="stat-label">Underpriced</div><div class="stat-val" style="color:var(--green)">${aa.filter(d=>d.alert==='underpriced').length}</div></div><div class="stat-card"><div class="stat-label">Meta Spike</div><div class="stat-val" style="color:var(--orange)">${aa.filter(d=>d.alert==='meta_spike').length}</div></div><div class="stat-card"><div class="stat-label">Corner Risk</div><div class="stat-val" style="color:var(--purple)">${aa.filter(d=>d.alert==='corner_risk').length}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;renderTable(AC,items);let histHtml='';if(HISTORY&&HISTORY.length>0){histHtml='<div class="history-section"><h3>Snapshot History (last '+HISTORY.length+')</h3>';HISTORY.slice().reverse().forEach(h=>{const d=new Date(h.timestamp);const ts=d.toLocaleString();histHtml+=`<div class="history-item">${ts} &mdash; ${h.item_count} items tracked</div>`;});histHtml+='</div>';}document.getElementById('footerText').innerHTML=histHtml;}
@@ -1642,7 +1779,7 @@ function renderCurrency(){document.getElementById('suggestGrid').style.display='
 function renderZ2M(){document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('stats').innerHTML='';const a=document.getElementById('z2mArea');const defaultBudget=DIV_RATIO>0?Math.round(DIV_RATIO):200;if(!a.getAttribute('data-init')){a.setAttribute('data-init','1');a.innerHTML=`<div class="z2m-input-row"><label style="font-size:13px;color:var(--muted)">Starting budget:</label><input type="number" id="z2mBudget" value="${defaultBudget}" min="1" step="100" style="font-size:18px;width:140px"><span class="chaos-val" style="font-size:16px">chaos</span><button class="budget-btn" onclick="calcZ2M()">Plan Path to Mirror</button></div><div style="display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:1rem"><span style="font-size:12px;color:var(--muted);width:100%">Enable/disable strategies:</span><label class="checkbox"><input type="checkbox" id="z2mFlip" checked> Flipping</label><label class="checkbox"><input type="checkbox" id="z2mCraft" checked> Crafting</label><label class="checkbox"><input type="checkbox" id="z2mCurrency" checked> Currency Exchange</label><label class="checkbox"><input type="checkbox" id="z2mCorrupt" checked> Corruption</label><label class="checkbox"><input type="checkbox" id="z2mGem" checked> Gem Leveling</label></div><div id="z2mResults"></div>`;}}
 function calcZ2M(){const startBudget=parseFloat(document.getElementById('z2mBudget').value)||DIV_RATIO||200;const mirrorPrice=MIRROR_PRICE>0?MIRROR_PRICE:50000;const res=document.getElementById('z2mResults');const useFlip=document.getElementById('z2mFlip').checked;const useCraft=document.getElementById('z2mCraft').checked;const useCurrency=document.getElementById('z2mCurrency').checked;const useCorrupt=document.getElementById('z2mCorrupt').checked;const useGem=document.getElementById('z2mGem').checked;const p1End=startBudget*2;const p2End=startBudget*10;const p3End=startBudget*50;const p4End=mirrorPrice;function findPhaseItems(minBuy,maxBuy,count){let candidates=[];if(useFlip){FLIPS.forEach(f=>{if(f.buy_price>=minBuy&&f.buy_price<=maxBuy&&f.profit>0){candidates.push({name:f.name,buy:f.buy_price,sell:f.sell_price,profit:f.profit,action:f.flip_type+': '+f.reason,type:'flip'});}});}if(useCraft){DATA.filter(d=>d.craft_profit>0&&d.craft_profit<=d.chaos*10&&d.chaos>=minBuy&&d.chaos<=maxBuy&&d.craft_method!=='corrupt'&&(d.confidence||95)>=40).forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'craft'});});}if(useCorrupt){DATA.filter(d=>d.craft_profit>0&&d.craft_profit<=d.chaos*10&&d.chaos>=minBuy&&d.chaos<=maxBuy&&(d.craft_method==='corrupt'||d.craft_method==='double_corrupt')&&(d.confidence||95)>=40).forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:d.craft_action||d.craft_method,type:'corrupt'});});}if(useGem){DATA.filter(d=>d.type==='SkillGem'&&d.craft_profit>0&&d.craft_profit<=d.chaos*10&&d.chaos>=minBuy&&d.chaos<=maxBuy&&(d.confidence||95)>=40).forEach(d=>{candidates.push({name:d.name,buy:d.chaos,sell:d.chaos+d.craft_profit,profit:d.craft_profit,action:'Level/quality gem',type:'gem'});});}if(useCurrency){CURRENCIES.filter(c=>c.spread>2&&c.spread<20&&c.reliable==='yes'&&c.chaos_eq>=0.1).forEach(c=>{const investAmt=Math.max(minBuy,50);const profitPerCycle=Math.round(investAmt*c.spread/100);if(profitPerCycle>0){candidates.push({name:c.name+' exchange',buy:investAmt,sell:investAmt+profitPerCycle,profit:profitPerCycle,action:'Buy/sell '+c.name+' ('+c.spread+'% spread, verify in-game)',type:'currency'});}});}candidates.sort((a,b)=>{const roiA=a.profit/a.buy;const roiB=b.profit/b.buy;return roiB-roiA;});const seen=new Set();const result=[];for(const c of candidates){if(seen.has(c.name))continue;seen.add(c.name);result.push(c);if(result.length>=count)break;}return result;}const phases=[{name:'Phase 1: Starter',target:`${fmt(Math.round(startBudget))}c to ${fmt(Math.round(p1End))}c`,startC:startBudget,endC:p1End,items:findPhaseItems(1,startBudget,5),desc:'Double your money with low-risk flips and crafts'},{name:'Phase 2: Builder',target:`${fmt(Math.round(p1End))}c to ${fmt(Math.round(p2End))}c`,startC:p1End,endC:p2End,items:findPhaseItems(Math.round(startBudget*0.5),Math.round(p1End*2),5),desc:'Scale up with 6-link flipping, bulk gem leveling, mid-tier uniques'},{name:'Phase 3: Investor',target:`${fmt(Math.round(p2End))}c to ${fmt(Math.round(p3End))}c`,startC:p2End,endC:p3End,items:findPhaseItems(Math.round(p1End),Math.round(p2End*2),5),desc:'High-value crafts, double corruptions, meta build item flipping'},{name:'Phase 4: Endgame',target:`${fmt(Math.round(p3End))}c to ${fmt(Math.round(p4End))}c (Mirror)`,startC:p3End,endC:p4End,items:findPhaseItems(Math.round(p2End),Math.round(p3End*2),5),desc:'Bulk flipping strategies, high-end crafts, final push'}];let currentPhase=0;if(startBudget>=p3End)currentPhase=3;else if(startBudget>=p2End)currentPhase=2;else if(startBudget>=p1End)currentPhase=1;const overallPct=Math.min(100,Math.round(startBudget/mirrorPrice*100*100)/100);let html=`<div class="z2m-overall-progress"><div class="z2m-overall-label">Progress to Mirror (${fmt(Math.round(mirrorPrice))}c)</div><div class="z2m-overall-val">${overallPct}% — ${fmt(Math.round(startBudget))}c / ${fmt(Math.round(mirrorPrice))}c</div><div class="z2m-progress" style="margin-top:8px"><div class="z2m-progress-fill" style="width:${overallPct}%"></div></div></div>`;phases.forEach((ph,i)=>{const isActive=i===currentPhase;const totalProfit=ph.items.reduce((s,it)=>s+it.profit,0);const phasePct=ph.endC>ph.startC?Math.min(100,Math.max(0,Math.round((startBudget-ph.startC)/(ph.endC-ph.startC)*100))):0;const phaseProgress=i<currentPhase?100:(i===currentPhase?Math.max(0,phasePct):0);const gap=ph.endC-Math.max(startBudget,ph.startC);const avgProfit=totalProfit>0?Math.round(totalProfit/ph.items.length):1;const cyclesNeeded=avgProfit>0?Math.ceil(Math.max(0,gap)/avgProfit):999;html+=`<div class="z2m-phase${isActive?' active-phase':''}"><div class="z2m-phase-header"><div><span class="z2m-phase-name">${ph.name}</span><span style="font-size:12px;color:var(--muted);margin-left:8px">${ph.desc}</span></div><span class="z2m-phase-target">${ph.target}</span></div><div class="z2m-progress"><div class="z2m-progress-fill" style="width:${phaseProgress}%"></div></div>`;if(ph.items.length>0){html+=ph.items.map(it=>`<div class="z2m-item"><div><span class="z2m-item-name">${esc(it.name)}</span><span class="z2m-item-detail" style="margin-left:8px">Buy at <span class="chaos-val">${fmt(it.buy)}c</span>, ${esc(it.action)}, sell for <span class="chaos-val">${fmt(it.sell)}c</span></span></div><span class="z2m-item-profit">+${fmt(it.profit)}c</span></div>`).join('');}else{html+='<div class="z2m-item"><span class="z2m-item-detail">No specific items found in this price range. Try manual trading or bulk strategies.</span></div>';}html+=`<div class="z2m-summary"><span>Start: <strong class="chaos-val">${fmt(Math.round(ph.startC))}c</strong></span><span>End: <strong class="chaos-val">${fmt(Math.round(ph.endC))}c</strong></span><span>Expected profit/cycle: <strong class="profit-positive">+${fmt(totalProfit)}c</strong></span><span>Est. cycles: <strong>${cyclesNeeded}</strong></span></div></div>`;});const remainingGap=Math.max(0,mirrorPrice-startBudget);const avgAllProfit=phases.reduce((s,p)=>s+p.items.reduce((s2,it)=>s2+it.profit,0),0);const totalCycles=avgAllProfit>0?Math.ceil(remainingGap/(avgAllProfit/4)):999;html+=`<div style="margin-top:1rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted)"><strong style="color:var(--accent)">Summary:</strong> You need <strong class="chaos-val">${fmt(Math.round(remainingGap))}c</strong> more to reach a Mirror. At an average of ~${fmt(Math.round(avgAllProfit/4))}c profit per cycle across all phases, you need roughly <strong>${totalCycles}</strong> more trade cycles. Good luck, Exile!</div>`;res.innerHTML=html;}
 function renderWhale(){const sf=document.getElementById('whaleStrategy').value;const tf=document.getElementById('whaleTag').value;const mc=parseFloat(document.getElementById('whaleMaxCost').value)||99999;const ml=parseInt(document.getElementById('whaleMaxList').value)||999;const co=document.getElementById('whaleCornerable').checked;const q=document.getElementById('whaleSearch').value.toLowerCase();const stratTags={corner:'flipping','6link_flip':'flipping',gem_level:'leveling',double_corrupt:'corruption',vaal_corrupt:'corruption',tainted_chaos_jewels:'corruption',harvest_fracture:'crafting',essence_craft:'crafting'};let items=WHALES.filter(w=>{if(sf!=='all'){if(!w.strategies.some(s=>s.id===sf))return false;}if(tf!=='all'){const matching=WHALE_STRATS.filter(s=>s.tag===tf).map(s=>s.id);if(!w.strategies.some(s=>matching.includes(s.id)))return false;}if(w.best_cost>mc)return false;if(w.listings>ml)return false;if(co&&w.corner_score<=0)return false;if(q&&!w.name.toLowerCase().includes(q))return false;return true;});const total=WHALES.length;const cornerable=WHALES.filter(w=>w.corner_score>0).length;const highP=items.filter(w=>w.best_profit>=500).length;document.getElementById('stats').innerHTML=`<div class="stat-card"><div class="stat-label">Whale Targets</div><div class="stat-val">${total}</div></div><div class="stat-card"><div class="stat-label">Cornerable</div><div class="stat-val" style="color:var(--purple)">${cornerable}</div></div><div class="stat-card"><div class="stat-label">500c+ Profit</div><div class="stat-val" style="color:var(--green)">${highP}</div></div><div class="stat-card"><div class="stat-label">Showing</div><div class="stat-val">${items.length}</div></div>`;document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';const g=document.getElementById('whaleGrid');if(!items.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">No whale targets match filters</div>';return;}const stratColors={corner:'var(--purple)','6link_flip':'var(--green)',gem_level:'var(--blue)',double_corrupt:'var(--red)',vaal_corrupt:'var(--red)',tainted_chaos_jewels:'var(--orange)',harvest_fracture:'var(--green)',essence_craft:'var(--yellow)'};const stratNames={corner:'Corner Supply','6link_flip':'6-Link Flip',gem_level:'Gem Level',double_corrupt:'Double Corrupt',vaal_corrupt:'Vaal Corrupt',tainted_chaos_jewels:'Tainted Chaos',harvest_fracture:'Harvest Fracture',essence_craft:'Essence Craft'};g.innerHTML=items.slice(0,60).map(w=>{const badges=[];if(w.builds&&w.builds.length)w.builds.forEach(b=>badges.push(`<span class="badge badge-build">${esc(b)}</span>`));const cornerHtml=w.corner_score>0?`<div style="display:flex;align-items:center;gap:6px;margin:6px 0"><span style="font-size:11px;color:var(--purple);font-weight:600">Corner Score: ${w.corner_score}/100</span><div style="width:80px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:${w.corner_score}%;background:var(--purple);border-radius:3px"></div></div></div>`:'';const stratPills=w.strategies.map(s=>`<span style="display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin:2px;background:${stratColors[s.id]||'var(--muted)'}20;color:${stratColors[s.id]||'var(--muted)'};border:1px solid ${stratColors[s.id]||'var(--muted)'}40">${stratNames[s.id]||s.id} +${fmt(s.profit)}c</span>`).join('');const listColor=w.listings<=3?'var(--red)':w.listings<=10?'var(--yellow)':'var(--muted)';const listWarn=w.listings<=5?'<span style="font-size:10px;color:var(--red);font-weight:600"> LOW SUPPLY</span>':'';const cf=w.confidence||95;const confHtml=cf<=50?`<div style="display:flex;align-items:center;gap:4px;margin:2px 0"><span style="font-size:10px;color:${confColor(cf)};font-weight:600">${confLabel(cf)} price</span><div class="conf-bar"><div class="conf-fill" style="width:${cf}%;background:${confColor(cf)}"></div></div></div>`:'';const reasonHtml=w.item_reason?`<div style="font-size:11px;color:var(--blue);margin-bottom:6px;padding:4px 8px;background:var(--blue)10;border-radius:4px;border-left:3px solid var(--blue)">${esc(w.item_reason)}</div>`:'';return `<div class="flip-card" style="border-color:${w.corner_score>50?'var(--purple)':'var(--border)'}"><div class="flip-header"><span class="flip-name">${esc(w.name)}${w.variant?` <span style="font-size:11px;color:var(--muted);font-weight:400">(${esc(w.variant)})</span>`:''}</span><span class="tier-badge" style="color:${w.tier_color};border-color:${w.tier_color}30;background:${w.tier_color}18">${esc(w.tier_label)}</span></div><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><span class="chaos-val" style="font-size:16px">${fmt(w.chaos)}c</span>${cf<=25?'<span style="font-size:10px;color:var(--red);font-weight:600" title="Very few listings on poe.ninja — price may not reflect actual market"> ⚠</span>':''}<span style="font-size:12px;color:${listColor};font-weight:600" title="Approximate count from poe.ninja — check trade site for real listings">~${w.listings} listed${listWarn}</span><span style="font-size:12px;color:var(--muted)">${TL[w.type]||w.type}</span>${badges.join('')}</div>${confHtml}${reasonHtml}${cornerHtml}<div style="margin:8px 0;padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)"><div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Best Strategy: ${stratNames[w.best_strategy]||w.best_strategy}</div><div style="font-size:12px;color:var(--text);line-height:1.5">${esc(w.best_detail)}</div><div style="display:flex;align-items:center;gap:12px;margin-top:6px"><span style="font-size:11px;color:var(--muted)">Cost: <span class="chaos-val">${fmt(w.best_cost)}c</span></span><span style="font-size:11px;color:var(--muted)">Expected: <span class="profit-${w.best_profit>=500?'high':'positive'}">+${fmt(w.best_profit)}c</span></span></div></div>${w.strategies.length>1?`<div style="margin-top:6px"><span style="font-size:10px;color:var(--muted)">Also viable:</span> ${stratPills}</div>`:''}<div style="margin-top:8px;display:flex;gap:6px;align-items:center"><a class="trade-link" href="${tradeUrlOfficial(w.name)}" target="_blank">Trade →</a><a class="trade-link-ninja" href="${tradeUrl(w.name,w.trade_cat)}" target="_blank">ninja</a></div></div>`;}).join('');}
-function renderGuide(){document.getElementById('stats').innerHTML='';document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('guideArea').innerHTML=`<div class="guide-wrap"><div class="guide-section"><div class="guide-summary"><strong>Tools &amp; Resources</strong> &mdash; Everything you need to make currency in PoE, all in one place.</div></div>${[['Essential Tools','<ul><li><strong>Awakened PoE Trade</strong> &mdash; in-game price checking overlay (Ctrl+D on items). Get it at: <a href="https://snosme.github.io/awakened-poe-trade" target="_blank" style="color:var(--blue)">snosme.github.io/awakened-poe-trade</a></li><li><strong>poe.ninja</strong> &mdash; real-time market data (you\'re looking at it). API-powered. <a href="https://poe.ninja" target="_blank" style="color:var(--blue)">poe.ninja</a></li><li><strong>Craft of Exile</strong> &mdash; simulate crafts before spending currency. <a href="https://craftofexile.com" target="_blank" style="color:var(--blue)">craftofexile.com</a></li><li><strong>Wealthy Exile</strong> &mdash; wealth tracking, chaos/hour, stash breakdowns. <a href="https://wealthyexile.com" target="_blank" style="color:var(--blue)">wealthyexile.com</a></li><li><strong>Exilence Next</strong> &mdash; net worth tracker, profit tracking per session.</li></ul>'],['Currency Making Methods','<ul><li><strong>Bulk Trading:</strong> Buy essences/scarabs/fossils cheap in small quantities, sell in bulk for 20-40% premium.</li><li><strong>Currency Flipping:</strong> Buy/sell same currency to different players. Use this dashboard\'s Currency tab to find spreads.</li><li><strong>Boss Farming:</strong> Farm specific bosses for guaranteed drops. Maven, Sirus, Uber Elder.</li><li><strong>Crafting Services:</strong> Use Craft of Exile to plan, offer services in trade chat.</li><li><strong>Vendor Recipes:</strong> Full rare set (ilvl 60-74) = 1 chaos. Unidentified = 2 chaos.</li><li><strong>Lab Running:</strong> Enchant popular helmets, sell for premium.</li><li><strong>Heist:</strong> Run grand heists for raw currency and unique drops.</li><li><strong>Div Card Investing:</strong> Buy incomplete sets below completion value.</li></ul>'],['Pro Tips','<ul><li>Always check poe.ninja 7-day trend before buying.</li><li>Use Awakened PoE Trade for instant in-game price checks.</li><li>Track your chaos/hour with Wealthy Exile or Exilence.</li><li>This dashboard works best when run morning + evening for alert coverage.</li><li>Start with the Budget Planner to get a focused plan before trading.</li></ul>'],['Price Tiers','<span class="guide-color" style="background:#888"></span>Under 1 div = base material. <span class="guide-color" style="background:#5b9bd5"></span>1-3 div = cheap targets. <span class="guide-color" style="background:#4CAF82"></span>3-6 div = mid profit zone. <span class="guide-color" style="background:#d4a017"></span>6-10 div = solid. <span class="guide-color" style="background:#e08833"></span>11-15 div = high value. <span class="guide-color" style="background:#e05555"></span>15+ div = chase items.'],['Meta Builds','<span class="badge badge-build">PC PF</span> Poisonous Concoction PF, <span class="badge badge-build">LA DE</span> Lightning Arrow DE, <span class="badge badge-build">GC Mine</span> Glacial Cascade Miner, <span class="badge badge-build">RF Chief</span> Righteous Fire Chief, <span class="badge badge-build">CWS Chief</span> CWS Chieftain, <span class="badge badge-build">Bleed Glad</span> Bleed Bow Glad. Items for these builds get blue badges and higher demand.'],['Alert Types','<ul><li><span class="badge-alert alert-spike">SPIKE</span> = +25% price increase.</li><li><span class="badge-alert alert-crash">CRASH</span> = -25% price drop.</li><li><span class="badge-alert alert-drying">DRYING</span> = listings dropping fast.</li><li><span class="badge-alert alert-flood">FLOOD</span> = listings surging.</li><li><span class="badge-alert alert-new">NEW</span> = new item appeared.</li><li><span class="badge-alert alert-underpriced">UNDERPRICED</span> = &gt;30% below median + high demand. Best buy signal.</li><li><span class="badge-alert alert-meta_spike">META SPIKE</span> = meta build item with rising price.</li><li><span class="badge-alert alert-corner_risk">CORNER RISK</span> = supply collapsed, possible market manipulation.</li></ul>'],['Workflow','1. Run script before session. 2. Check Alerts for changes. 3. Check Flip Finder for quick wins. 4. Check Currency tab for exchange profits. 5. Budget Planner for craft plan. 6. Use Zero to Mirror for long-term goals. 7. Click Trade links to buy. 8. Run again after session.']].map(([t,b])=>`<div class="guide-section"><div class="guide-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.guide-arrow').classList.toggle('open')"><h2>${t}</h2><span class="guide-arrow">&#9660;</span></div><div class="guide-body"><p>${b}</p></div></div>`).join('')}</div>`;}
+function renderGuide(){document.getElementById('stats').innerHTML='';document.getElementById('thead').innerHTML='';document.getElementById('tbody').innerHTML='';document.getElementById('guideArea').innerHTML=`<div class="guide-wrap"><div class="guide-section"><div class="guide-summary"><strong>Tools &amp; Resources</strong> &mdash; Everything you need to make currency in PoE, all in one place.</div></div>${[['Essential Tools','<ul><li><strong>Awakened PoE Trade</strong> &mdash; in-game price checking overlay (Ctrl+D on items). Get it at: <a href="https://snosme.github.io/awakened-poe-trade" target="_blank" style="color:var(--blue)">snosme.github.io/awakened-poe-trade</a></li><li><strong>poe.ninja</strong> &mdash; real-time market data (you\'re looking at it). API-powered. <a href="https://poe.ninja" target="_blank" style="color:var(--blue)">poe.ninja</a></li><li><strong>Craft of Exile</strong> &mdash; simulate crafts before spending currency. <a href="https://craftofexile.com" target="_blank" style="color:var(--blue)">craftofexile.com</a></li><li><strong>Wealthy Exile</strong> &mdash; wealth tracking, chaos/hour, stash breakdowns. <a href="https://wealthyexile.com" target="_blank" style="color:var(--blue)">wealthyexile.com</a></li><li><strong>Exilence Next</strong> &mdash; net worth tracker, profit tracking per session.</li></ul>'],['Currency Making Methods','<ul><li><strong>Bulk Trading:</strong> Buy essences/scarabs/fossils cheap in small quantities, sell in bulk for 20-40% premium.</li><li><strong>Currency Flipping:</strong> Buy/sell same currency to different players. Use this dashboard\'s Currency tab to find spreads.</li><li><strong>Boss Farming:</strong> Farm specific bosses for guaranteed drops. Maven, Sirus, Uber Elder.</li><li><strong>Crafting Services:</strong> Use Craft of Exile to plan, offer services in trade chat.</li><li><strong>Vendor Recipes:</strong> Full rare set (ilvl 60-74) = 1 chaos. Unidentified = 2 chaos.</li><li><strong>Lab Running:</strong> Enchant popular helmets, sell for premium.</li><li><strong>Heist:</strong> Run grand heists for raw currency and unique drops.</li><li><strong>Div Card Investing:</strong> Buy incomplete sets below completion value.</li></ul>'],['Pro Tips','<ul><li>Always check poe.ninja 7-day trend before buying.</li><li>Use Awakened PoE Trade for instant in-game price checks.</li><li>Track your chaos/hour with Wealthy Exile or Exilence.</li><li>This dashboard works best when run morning + evening for alert coverage.</li><li>Start with the Budget Planner to get a focused plan before trading.</li></ul>'],['Price Tiers','<span class="guide-color" style="background:#888"></span>Under 1 div = base material. <span class="guide-color" style="background:#5b9bd5"></span>1-3 div = cheap targets. <span class="guide-color" style="background:#4CAF82"></span>3-6 div = mid profit zone. <span class="guide-color" style="background:#d4a017"></span>6-10 div = solid. <span class="guide-color" style="background:#e08833"></span>11-15 div = high value. <span class="guide-color" style="background:#e05555"></span>15+ div = chase items.'],['Meta Builds (3.28 Mirage)','<span class="badge badge-build">KF Hiero</span> Kinetic Fusillade Hierophant, <span class="badge badge-build">GC Elem</span> GC Fissure Elementalist, <span class="badge badge-build">PC PF</span> PC Bouncing Pathfinder, <span class="badge badge-build">LA DE</span> LA/Ele Hit Deadeye, <span class="badge badge-build">Blight</span> Blight Contagion Trickster, <span class="badge badge-build">CWS RF</span> CWS RF Chieftain, <span class="badge badge-build">Absol</span> Absolution Guardian, <span class="badge badge-build">EoW Inq</span> EoW Mines Inquisitor. Items for these builds get blue badges and higher demand.'],['Alert Types','<ul><li><span class="badge-alert alert-spike">SPIKE</span> = +25% price increase.</li><li><span class="badge-alert alert-crash">CRASH</span> = -25% price drop.</li><li><span class="badge-alert alert-drying">DRYING</span> = listings dropping fast.</li><li><span class="badge-alert alert-flood">FLOOD</span> = listings surging.</li><li><span class="badge-alert alert-new">NEW</span> = new item appeared.</li><li><span class="badge-alert alert-underpriced">UNDERPRICED</span> = &gt;30% below median + high demand. Best buy signal.</li><li><span class="badge-alert alert-meta_spike">META SPIKE</span> = meta build item with rising price.</li><li><span class="badge-alert alert-corner_risk">CORNER RISK</span> = supply collapsed, possible market manipulation.</li></ul>'],['Workflow','1. Run script before session. 2. Check Alerts for changes. 3. Check Flip Finder for quick wins. 4. Check Currency tab for exchange profits. 5. Budget Planner for craft plan. 6. Use Zero to Mirror for long-term goals. 7. Click Trade links to buy. 8. Run again after session.']].map(([t,b])=>`<div class="guide-section"><div class="guide-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.guide-arrow').classList.toggle('open')"><h2>${t}</h2><span class="guide-arrow">&#9660;</span></div><div class="guide-body"><p>${b}</p></div></div>`).join('')}</div>`;}
 function renderTable(cols,items){document.getElementById('thead').innerHTML='<tr>'+cols.map(c=>{const a=sortKey===c.key?(sortDir===-1?' \u2193':' \u2191'):'';return `<th class="${sortKey===c.key?'sorted':''}" onclick="setSort('${c.key}')">${c.label}${a}</th>`;}).join('')+'</tr>';if(!items.length){document.getElementById('tbody').innerHTML=`<tr><td colspan="${cols.length}" class="empty">No items match</td></tr>`;return;}document.getElementById('tbody').innerHTML=items.slice(0,200).map(r=>'<tr>'+cols.map(c=>`<td>${fmtCell(c.fmt,r[c.key],r)}</td>`).join('')+'</tr>').join('');}
 function setSort(k){if(k==='_t')return;if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=-1;}render();}
 if(DATA.some(d=>d.alert))document.getElementById('alertDot').style.display='inline-block';
@@ -1697,6 +1834,15 @@ def main():
     save_current_data(all_rows)
     flips = find_flips(all_rows)
 
+    # Foulborn 6L flips (league mechanic)
+    foulborn_flips = find_foulborn_flips(all_rows)
+    print(f"  -> Foulborn 6L flips: {len(foulborn_flips)}")
+
+    # Div card set completions
+    div_cards_raw = fetch_div_cards()
+    div_card_flips = find_div_card_flips(div_cards_raw) if div_cards_raw else []
+    print(f"  -> Div card flips: {len(div_card_flips)}")
+
     # Fetch currency data
     currencies, arb_loops = fetch_all_currencies()
     print(f"  -> {len(currencies)} currencies, {len(arb_loops)} arbitrage loops")
@@ -1730,6 +1876,8 @@ def main():
         html = html.replace(f"'{k}':" + "${0}", f"'{k}':{v}")
     html = html.replace("ALL_DATA_JSON", json.dumps(all_rows))
     html = html.replace("ALL_FLIPS_JSON", json.dumps(flips))
+    html = html.replace("ALL_FOULBORN_JSON", json.dumps(foulborn_flips))
+    html = html.replace("ALL_DIVCARD_JSON", json.dumps(div_card_flips))
     html = html.replace("ALL_WHALE_JSON", json.dumps(whale_targets))
     html = html.replace("ALL_STRATS_JSON", json.dumps(WHALE_STRATEGIES))
     html = html.replace("ALL_CURRENCY_JSON", json.dumps(currencies))
